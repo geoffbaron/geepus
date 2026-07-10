@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { is } from './util/env';
 import { registerIpcHandlers } from './ipc';
+import { bootstrapBundledModel } from './models/bootstrap';
 
 process.on('uncaughtException', (err) => {
   console.error('[Geepus] Uncaught exception:', err);
@@ -16,7 +17,7 @@ app.on('open-file', (event) => {
   event.preventDefault();
 });
 
-function createWindow(): void {
+function createWindow(): BrowserWindow {
   const win = new BrowserWindow({
     width: 1100,
     height: 760,
@@ -72,11 +73,19 @@ function createWindow(): void {
   } else {
     win.loadFile(join(__dirname, '../renderer/index.html'));
   }
+
+  return win;
 }
 
 app.whenReady().then(() => {
   registerIpcHandlers();
-  createWindow();
+  const win = createWindow();
+
+  // Runs in the background — the window is usable immediately, and providers
+  // just wait on getBundledModelPath() resolving (PLAN.md §6.5).
+  void bootstrapBundledModel((downloadedBytes, totalBytes) => {
+    win.webContents.send('models.bundledDownloadProgress', { downloadedBytes, totalBytes });
+  });
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

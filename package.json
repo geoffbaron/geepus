@@ -12,10 +12,12 @@
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
     "lint": "eslint . --max-warnings 0",
     "test": "vitest run",
+    "verify:catalog": "node scripts/verify-catalog.mts",
     "dist:lite": "npm run build && electron-builder --mac --config electron-builder.yml",
     "dist:full": "GEEPUS_BUNDLE=full npm run build && GEEPUS_BUNDLE=full electron-builder --mac --config electron-builder.yml"
   },
   "dependencies": {
+    "node-llama-cpp": "^3.19.0",
     "ws": "^8.19.0"
   },
   "devDependencies": {

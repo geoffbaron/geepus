@@ -13,3 +13,6 @@ coverage/
 snapshot/electron-geepus/node_modules/
 snapshot/electron-geepus/dist/
 snapshot/.build/
+
+# scratch space for downloaded models / e2e userData during local dev — never commit binaries
+.dev-cache/
