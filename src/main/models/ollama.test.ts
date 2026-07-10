@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { OllamaProvider, isOllamaServerUp } from './ollama';
+import { OllamaProvider, isOllamaServerUp, listOllamaModelsDetailed } from './ollama';
 import type { ChatChunk } from '@shared/model';
 
 function ndjsonResponse(lines: string[]): Response {
@@ -121,5 +121,25 @@ describe('isOllamaServerUp', () => {
   it('is false when the request throws (server not running)', async () => {
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('ECONNREFUSED')));
     expect(await isOllamaServerUp()).toBe(false);
+  });
+});
+
+describe('listOllamaModelsDetailed', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('converts byte sizes to rounded GB', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({ models: [{ name: 'llama3.2:3b', size: 2_147_483_648 }, { name: 'no-size' }] }),
+          { status: 200 },
+        ),
+      ),
+    );
+    expect(await listOllamaModelsDetailed()).toEqual([
+      { name: 'llama3.2:3b', sizeGb: 2 },
+      { name: 'no-size', sizeGb: 0 },
+    ]);
   });
 });

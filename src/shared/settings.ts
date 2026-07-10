@@ -6,6 +6,7 @@ import type { ProviderId } from './model';
  * to this type (enforced there via a compile-time check).
  */
 export interface Settings {
+  onboardingComplete: boolean;
   activeProvider: ProviderId;
   ollama: { baseUrl: string; model: string };
   bundled: { modelFilename: string };

@@ -9,6 +9,7 @@ export const ProviderIdSchema = z.enum(['ollama', 'bundled', 'openrouter']);
  * the prototype's plaintext settings.json).
  */
 export const SettingsSchema = z.object({
+  onboardingComplete: z.boolean().default(false),
   activeProvider: ProviderIdSchema.default('bundled'),
   ollama: z
     .object({

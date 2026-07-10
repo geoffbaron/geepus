@@ -6,8 +6,14 @@
  * Each milestone adds its own namespace here and a matching module under src/main/ipc/.
  */
 
-import type { ChatChunk, ChatRequest, ProviderStatus } from './model';
+import type { ChatChunk, ChatRequest, OllamaPullProgress, ProviderStatus } from './model';
 import type { Settings } from './settings';
+import type { DiscoveryReport, InstallOllamaResult, MachineProfile, Recommendation, SetupPlan } from './setup';
+
+export interface DownloadProgress {
+  downloadedBytes: number;
+  totalBytes: number;
+}
 
 export interface IpcApi {
   app: {
@@ -17,13 +23,24 @@ export interface IpcApi {
     listProviders: () => Promise<ProviderStatus[]>;
     /** Streams chunks via onChunk as they arrive; returns an unsubscribe function. */
     chat: (request: ChatRequest, onChunk: (chunk: ChatChunk) => void) => () => void;
-    onBundledDownloadProgress: (
-      onProgress: (progress: { downloadedBytes: number; totalBytes: number }) => void,
-    ) => () => void;
+    onBundledDownloadProgress: (onProgress: (progress: DownloadProgress) => void) => () => void;
   };
   settings: {
     get: () => Promise<Settings>;
     update: (partial: Partial<Settings>) => Promise<Settings>;
+  };
+  setup: {
+    probeHardware: () => Promise<MachineProfile>;
+    discover: () => Promise<DiscoveryReport>;
+    recommend: (profile: MachineProfile) => Promise<Recommendation>;
+    determinePath: (profile: MachineProfile, discovery: DiscoveryReport) => Promise<SetupPlan>;
+    adoptOllamaModel: (modelName: string) => Promise<Settings>;
+    useBundled: () => Promise<Settings>;
+    pullModel: (tag: string, onProgress: (progress: OllamaPullProgress) => void) => () => void;
+    installOllama: (onProgress: (progress: DownloadProgress) => void) => Promise<InstallOllamaResult>;
+    launchOllama: () => Promise<boolean>;
+    requestNotificationPermission: () => Promise<boolean>;
+    completeOnboarding: () => Promise<Settings>;
   };
 }
 

@@ -53,6 +53,22 @@ export async function listOllamaModels(baseUrl = DEFAULT_BASE_URL): Promise<stri
   return (data.models ?? []).map((m) => m.name);
 }
 
+export interface OllamaModelInfo {
+  name: string;
+  sizeGb: number;
+}
+
+/** Like listOllamaModels but with byte sizes, so setup/discovery.ts can judge "does this fit RAM". */
+export async function listOllamaModelsDetailed(baseUrl = DEFAULT_BASE_URL): Promise<OllamaModelInfo[]> {
+  const res = await fetch(`${baseUrl}/api/tags`);
+  if (!res.ok) throw new Error(`ollama /api/tags failed: ${res.status}`);
+  const data = (await res.json()) as { models?: Array<{ name: string; size?: number }> };
+  return (data.models ?? []).map((m) => ({
+    name: m.name,
+    sizeGb: Math.round(((m.size ?? 0) / 1024 ** 3) * 10) / 10,
+  }));
+}
+
 /** Spawns `ollama serve` detached and polls until the HTTP API responds. */
 export async function startOllamaServe(binaryPath: string): Promise<void> {
   const { spawn } = await import('node:child_process');
