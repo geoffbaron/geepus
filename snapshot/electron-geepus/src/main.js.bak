@@ -1,0 +1,5206 @@
+const { app, BrowserWindow, ipcMain } = require('electron');
+const path = require('path');
+const fs = require('fs/promises');
+const fsSync = require('fs');
+const { spawn } = require('child_process');
+const crypto = require('crypto');
+
+const PROVIDERS = {
+  openai: {
+    defaultBaseUrl: 'https://api.openai.com/v1',
+  },
+  anthropic: {
+    defaultBaseUrl: 'https://api.anthropic.com/v1',
+  },
+};
+const DEFAULT_PROVIDER = 'openai';
+const DEFAULT_BASE_URL = PROVIDERS[DEFAULT_PROVIDER].defaultBaseUrl;
+const SETTINGS_FILE = 'settings.json';
+const DEFAULT_WORKSPACE_ROOT = app.getPath('home');
+const DEFAULT_RUN_LIMITS = {
+  maxIterations: 12,
+  maxRuntimeMinutes: 15,
+  maxActions: 120,
+  maxModelCallsPerMinute: 12,
+  maxToolCallsPerMinute: 24,
+  idleTimeoutSeconds: 120,
+  consecutiveDriftLimit: 2,
+};
+const AUDIT_LOG_FILE = 'agent-audit.log';
+const AUDIT_HEAD_FILE = 'agent-audit.head';
+const RUNS_DIR = 'agent-runs';
+const MEMORY_DIR = 'agent-memory';
+const GLOBAL_MEMORY_FILE = 'global-memory.json';
+const AUTO_SEARCH_SUBDIRS = ['Desktop', 'Documents', 'Downloads', 'Projects', 'Developer', 'Code', 'Repos'];
+const AUTO_IGNORED_DIRS = new Set([
+  '.git',
+  'node_modules',
+  'dist',
+  '.next',
+  '.build',
+  'Library',
+  'Applications',
+  '.Trash',
+  '.cache',
+  '.venv',
+  'venv',
+]);
+const PROJECT_MARKER_FILES = ['package.json', 'pyproject.toml', 'Package.swift', '.git', 'index.html'];
+const GENERIC_OBJECTIVE_WORDS = new Set([
+  'okay',
+  'ok',
+  'project',
+  'research',
+  'build',
+  'app',
+  'application',
+  'task',
+  'please',
+  'proceed',
+  'continue',
+  'start',
+  'stop',
+  'work',
+  'things',
+  'something',
+  'anything',
+  'help',
+  'make',
+  'want',
+  'need',
+  'what',
+  'should',
+  'would',
+  'could',
+  'about',
+  'our',
+  'we',
+  'with',
+  'that',
+  'this',
+  'from',
+  'into',
+  'your',
+  'my',
+  'the',
+  'for',
+  'and',
+  'not',
+  'dont',
+  "don't",
+  'only',
+  'plan',
+  'planning',
+  'mode',
+  'action',
+]);
+const INFRA_KEYWORDS = [
+  'aws',
+  'amplify',
+  'cloudformation',
+  'terraform',
+  'kubernetes',
+  'docker',
+  'devops',
+  'deployment',
+  'serverless',
+  'ec2',
+  'iam',
+  'vpc',
+  'lambda',
+  's3',
+];
+const READ_ONLY_COMMANDS = new Set(['ls', 'pwd', 'cat', 'find', 'head', 'tail', 'wc']);
+const TEAM_OWNER_ORDER = ['chief', 'strategist', 'research', 'product', 'design', 'engineering', 'qa'];
+const RESEARCH_TEAM_OWNER_ORDER = ['chief', 'strategist', 'research'];
+const TEAM_OWNER_LABELS = {
+  chief: 'Chief of Staff',
+  strategist: 'Strategist',
+  research: 'Research Lead',
+  product: 'Product Lead',
+  design: 'Design Lead',
+  engineering: 'Engineering Lead',
+  qa: 'QA Lead',
+};
+
+const watchWindows = new Set();
+const watchStateByRun = new Map();
+const activeRunIds = new Set();
+const stopRequestsByRun = new Map();
+const activeChildrenByRun = new Map();
+
+function settingsPath() {
+  return path.join(app.getPath('userData'), SETTINGS_FILE);
+}
+
+function auditLogPath() {
+  return path.join(app.getPath('userData'), AUDIT_LOG_FILE);
+}
+
+function auditHeadPath() {
+  return path.join(app.getPath('userData'), AUDIT_HEAD_FILE);
+}
+
+function runStateDir() {
+  return path.join(app.getPath('userData'), RUNS_DIR);
+}
+
+function runStatePath(runId) {
+  return path.join(runStateDir(), `${runId}.json`);
+}
+
+function memoryDir() {
+  return path.join(app.getPath('userData'), MEMORY_DIR);
+}
+
+function globalMemoryPath() {
+  return path.join(memoryDir(), GLOBAL_MEMORY_FILE);
+}
+
+function sha256(value) {
+  return crypto.createHash('sha256').update(String(value)).digest('hex');
+}
+
+function modelScore(modelName) {
+  const name = String(modelName || '').toLowerCase();
+  let score = 0;
+
+  if (name.startsWith('claude-opus')) {
+    score += 130;
+  } else if (name.startsWith('claude-sonnet')) {
+    score += 115;
+  } else if (name.startsWith('claude-haiku')) {
+    score += 95;
+  }
+
+  if (name.startsWith('o4')) {
+    score += 120;
+  } else if (name.startsWith('o3')) {
+    score += 110;
+  } else if (name.startsWith('o1')) {
+    score += 100;
+  } else if (name.startsWith('gpt-5')) {
+    score += 95;
+  } else if (name.startsWith('gpt-4.1')) {
+    score += 90;
+  } else if (name.startsWith('gpt-4o')) {
+    score += 80;
+  } else if (name.includes('codex')) {
+    score += 75;
+  } else if (name.startsWith('gpt-4')) {
+    score += 70;
+  } else if (name.startsWith('gpt-3.5')) {
+    score += 25;
+  }
+
+  if (name.includes('mini')) {
+    score -= 20;
+  }
+  if (name.includes('preview')) {
+    score -= 5;
+  }
+
+  return score;
+}
+
+function normalizeProvider(provider) {
+  const value = String(provider || '').trim().toLowerCase();
+  return Object.prototype.hasOwnProperty.call(PROVIDERS, value) ? value : DEFAULT_PROVIDER;
+}
+
+function defaultBaseUrlForProvider(provider) {
+  const resolved = normalizeProvider(provider);
+  return PROVIDERS[resolved].defaultBaseUrl;
+}
+
+function pickBestModel(models, preferred) {
+  if (!Array.isArray(models) || models.length === 0) {
+    return preferred || '';
+  }
+
+  const sorted = [...models].sort((left, right) => modelScore(right) - modelScore(left));
+  if (!preferred || !models.includes(preferred)) {
+    return sorted[0];
+  }
+
+  const preferredScore = modelScore(preferred);
+  const bestScore = modelScore(sorted[0]);
+  if (bestScore - preferredScore >= 25) {
+    return sorted[0];
+  }
+  return preferred;
+}
+
+function normalizeWorkspaceRoot(workspaceRoot) {
+  const value = typeof workspaceRoot === 'string' ? workspaceRoot.trim() : '';
+  return value.length > 0 ? value : DEFAULT_WORKSPACE_ROOT;
+}
+
+function normalizeRunLimits(raw, fallback = DEFAULT_RUN_LIMITS) {
+  const source = ensureObject(raw);
+  const base = ensureObject(fallback);
+  return {
+    maxIterations: clampNumber(Number(source.maxIterations ?? base.maxIterations ?? DEFAULT_RUN_LIMITS.maxIterations), 1, 120, DEFAULT_RUN_LIMITS.maxIterations),
+    maxRuntimeMinutes: clampNumber(Number(source.maxRuntimeMinutes ?? base.maxRuntimeMinutes ?? DEFAULT_RUN_LIMITS.maxRuntimeMinutes), 1, 720, DEFAULT_RUN_LIMITS.maxRuntimeMinutes),
+    maxActions: clampNumber(Number(source.maxActions ?? base.maxActions ?? DEFAULT_RUN_LIMITS.maxActions), 1, 4000, DEFAULT_RUN_LIMITS.maxActions),
+    maxModelCallsPerMinute: clampNumber(Number(source.maxModelCallsPerMinute ?? base.maxModelCallsPerMinute ?? DEFAULT_RUN_LIMITS.maxModelCallsPerMinute), 1, 240, DEFAULT_RUN_LIMITS.maxModelCallsPerMinute),
+    maxToolCallsPerMinute: clampNumber(Number(source.maxToolCallsPerMinute ?? base.maxToolCallsPerMinute ?? DEFAULT_RUN_LIMITS.maxToolCallsPerMinute), 1, 480, DEFAULT_RUN_LIMITS.maxToolCallsPerMinute),
+    idleTimeoutSeconds: clampNumber(Number(source.idleTimeoutSeconds ?? base.idleTimeoutSeconds ?? DEFAULT_RUN_LIMITS.idleTimeoutSeconds), 30, 1800, DEFAULT_RUN_LIMITS.idleTimeoutSeconds),
+    consecutiveDriftLimit: clampNumber(Number(source.consecutiveDriftLimit ?? base.consecutiveDriftLimit ?? DEFAULT_RUN_LIMITS.consecutiveDriftLimit), 1, 20, DEFAULT_RUN_LIMITS.consecutiveDriftLimit),
+  };
+}
+
+function normalizeBaseUrl(baseUrl, provider = DEFAULT_PROVIDER) {
+  const fallback = defaultBaseUrlForProvider(provider);
+  const raw = (baseUrl || fallback).trim();
+  return raw.replace(/\/+$/, '');
+}
+
+function normalizeExecutionMode(value) {
+  return String(value || '').trim().toLowerCase() === 'research' ? 'research' : 'action';
+}
+
+function normalizeModelList(rawModels, provider = DEFAULT_PROVIDER) {
+  const preferredPrefixes = provider === 'anthropic'
+    ? ['claude-']
+    : ['gpt-', 'o1', 'o3', 'o4', 'codex', 'chatgpt'];
+  const excludedTerms = ['embedding', 'moderation', 'whisper', 'tts', 'transcribe', 'realtime'];
+
+  const unique = Array.from(new Set(rawModels.filter(Boolean))).sort((a, b) => {
+    const scoreDiff = modelScore(b) - modelScore(a);
+    return scoreDiff !== 0 ? scoreDiff : a.localeCompare(b);
+  });
+  const preferred = unique.filter((model) => {
+    const lower = model.toLowerCase();
+    const isPreferred = preferredPrefixes.some((prefix) => lower.startsWith(prefix));
+    const isExcluded = excludedTerms.some((term) => lower.includes(term));
+    return isPreferred && !isExcluded;
+  });
+
+  return preferred.length > 0 ? preferred : unique;
+}
+
+async function readSettings() {
+  try {
+    const content = await fs.readFile(settingsPath(), 'utf8');
+    const parsed = JSON.parse(content);
+    const provider = normalizeProvider(parsed.provider);
+    return {
+      provider,
+      apiKey: typeof parsed.apiKey === 'string' ? parsed.apiKey : '',
+      model: typeof parsed.model === 'string' ? parsed.model : '',
+      baseUrl: normalizeBaseUrl(typeof parsed.baseUrl === 'string' ? parsed.baseUrl : '', provider),
+      autoDiscover: parsed.autoDiscover !== false,
+      workspaceRoot: normalizeWorkspaceRoot(parsed.workspaceRoot),
+      teamMode: parsed.teamMode === 'solo' ? 'solo' : 'teams',
+      runLimits: normalizeRunLimits(parsed.runLimits),
+    };
+  } catch {
+    const provider = DEFAULT_PROVIDER;
+    return {
+      provider,
+      apiKey: '',
+      model: '',
+      baseUrl: defaultBaseUrlForProvider(provider),
+      autoDiscover: true,
+      workspaceRoot: DEFAULT_WORKSPACE_ROOT,
+      teamMode: 'teams',
+      runLimits: normalizeRunLimits({}),
+    };
+  }
+}
+
+async function writeSettings(next) {
+  const provider = normalizeProvider(next.provider);
+  const payload = {
+    provider,
+    apiKey: next.apiKey || '',
+    model: next.model || '',
+    baseUrl: normalizeBaseUrl(next.baseUrl, provider),
+    autoDiscover: next.autoDiscover !== false,
+    workspaceRoot: normalizeWorkspaceRoot(next.workspaceRoot),
+    teamMode: next.teamMode === 'solo' ? 'solo' : 'teams',
+    runLimits: normalizeRunLimits(next.runLimits, next.runLimits || DEFAULT_RUN_LIMITS),
+  };
+  const file = settingsPath();
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  await fs.writeFile(file, JSON.stringify(payload, null, 2), { mode: 0o600 });
+  return payload;
+}
+
+async function appendAuditEvent(event) {
+  const ts = new Date().toISOString();
+  const prevHash = (await fs.readFile(auditHeadPath(), 'utf8').catch(() => '')).trim() || 'GENESIS';
+  const payload = {
+    ts,
+    prev_hash: prevHash,
+    ...event,
+  };
+  const hash = sha256(JSON.stringify(payload));
+  const line = JSON.stringify({
+    ...payload,
+    hash,
+  });
+
+  await fs.mkdir(path.dirname(auditLogPath()), { recursive: true });
+  await fs.appendFile(auditLogPath(), `${line}\n`, 'utf8');
+  await fs.writeFile(auditHeadPath(), hash, 'utf8');
+}
+
+async function persistRunState(runState) {
+  const payload = {
+    ...runState,
+    updatedAt: new Date().toISOString(),
+  };
+  await fs.mkdir(runStateDir(), { recursive: true });
+  await fs.writeFile(runStatePath(payload.runId), JSON.stringify(payload, null, 2), 'utf8');
+  return payload;
+}
+
+async function readRunState(runId) {
+  const content = await fs.readFile(runStatePath(runId), 'utf8');
+  return JSON.parse(content);
+}
+
+function summarizeRunForList(runState) {
+  return {
+    runId: runState.runId,
+    objective: String(runState.objective || ''),
+    state: String(runState.state || 'unknown'),
+    reason: String(runState.reason || ''),
+    provider: String(runState.provider || DEFAULT_PROVIDER),
+    teamMode: runState.teamMode === 'solo' ? 'solo' : 'teams',
+    executionMode: normalizeExecutionMode(runState.executionMode || 'action'),
+    workspaceDiscoverySource: String(runState.workspaceDiscoverySource || ''),
+    model: String(runState.model || ''),
+    workspaceRoot: String(runState.workspaceRoot || ''),
+    createdAt: runState.createdAt || null,
+    startedAt: runState.startedAt || null,
+    updatedAt: runState.updatedAt || null,
+    iterations: Array.isArray(runState.iterations) ? runState.iterations.length : 0,
+    totalActions: Array.isArray(runState.results) ? runState.results.length : 0,
+    maxIterations: Number(runState.maxIterations || 0),
+    maxRuntimeMinutes: Number(runState.maxRuntimeMinutes || 0),
+    maxActions: Number((runState.runLimits && runState.runLimits.maxActions) || runState.remainingActions || 0),
+    maxModelCallsPerMinute: Number(runState.maxModelCallsPerMinute || 0),
+    maxToolCallsPerMinute: Number(runState.maxToolCallsPerMinute || 0),
+    idleTimeoutSeconds: Number(runState.idleTimeoutSeconds || 0),
+    consecutiveDriftLimit: Number(runState.consecutiveDriftLimit || 0),
+  };
+}
+
+function classifyReviewAction(result) {
+  const summary = String(result.summary || '').toLowerCase();
+  const intent = String(result.intent || '').toLowerCase();
+  if (result.tool === 'read_file' || result.tool === 'list_files') {
+    return true;
+  }
+  if (result.tool !== 'run_command') {
+    return false;
+  }
+  return (
+    summary.includes(' test') ||
+    summary.includes(' lint') ||
+    summary.includes(' build') ||
+    intent.includes('test') ||
+    intent.includes('lint') ||
+    intent.includes('verify') ||
+    intent.includes('review')
+  );
+}
+
+function buildWorkflowView(runState) {
+  const iterations = Array.isArray(runState.iterations) ? runState.iterations : [];
+  const planner = [];
+  const builder = [];
+  const reviewer = [];
+  const checkpoints = [];
+
+  iterations.forEach((iteration) => {
+    planner.push({
+      id: `planner-${iteration.iteration}`,
+      iteration: iteration.iteration,
+      text: iteration.summary,
+      status: iteration.results.every((item) => item.ok) ? 'done' : 'failed',
+    });
+
+    iteration.results.forEach((result, index) => {
+      const base = {
+        id: `iter-${iteration.iteration}-action-${index + 1}`,
+        iteration: iteration.iteration,
+        text: `${ownerLabel(result.owner)} • ${result.tool}: ${result.intent}`,
+        status: result.ok ? 'done' : 'failed',
+      };
+      if (classifyReviewAction(result)) {
+        reviewer.push(base);
+      } else {
+        builder.push(base);
+      }
+    });
+
+    checkpoints.push({
+      iteration: iteration.iteration,
+      status: iteration.results.every((item) => item.ok) ? 'done' : 'failed',
+      summary: iteration.summary,
+      actions: iteration.results.length,
+      okActions: iteration.results.filter((item) => item.ok).length,
+    });
+  });
+
+  return {
+    lanes: {
+      planner,
+      builder,
+      reviewer,
+    },
+    checkpoints,
+  };
+}
+
+async function listRunStates(limit = 40) {
+  await fs.mkdir(runStateDir(), { recursive: true });
+  const files = await fs.readdir(runStateDir());
+  const runFiles = files.filter((file) => file.endsWith('.json'));
+  const runs = [];
+
+  for (const file of runFiles) {
+    try {
+      const content = await fs.readFile(path.join(runStateDir(), file), 'utf8');
+      const parsed = JSON.parse(content);
+      if (
+        parsed
+        && parsed.runId
+        && parsed.state === 'running'
+        && !activeRunIds.has(parsed.runId)
+      ) {
+        parsed.state = 'stopped';
+        parsed.reason = parsed.reason || 'Run interrupted. You can resume it.';
+        parsed.updatedAt = new Date().toISOString();
+        await fs.writeFile(
+          runStatePath(parsed.runId),
+          JSON.stringify(parsed, null, 2),
+          'utf8',
+        );
+      }
+      runs.push(parsed);
+    } catch {
+      // Ignore malformed files.
+    }
+  }
+
+  runs.sort((left, right) => {
+    const l = new Date(left.updatedAt || left.startedAt || 0).getTime();
+    const r = new Date(right.updatedAt || right.startedAt || 0).getTime();
+    return r - l;
+  });
+
+  return runs.slice(0, limit);
+}
+
+function watchOwners(teamMode = 'teams', executionMode = 'action') {
+  const mode = normalizeExecutionMode(executionMode);
+  if (mode === 'research') {
+    return RESEARCH_TEAM_OWNER_ORDER;
+  }
+  return teamMode === 'solo' ? ['engineering'] : TEAM_OWNER_ORDER;
+}
+
+function defaultWatchAgents(teamMode = 'teams', executionMode = 'action') {
+  const owners = watchOwners(teamMode, executionMode);
+  return owners.reduce((acc, owner) => {
+    acc[owner] = {
+      label: ownerLabel(owner),
+      status: 'idle',
+      currentAction: '',
+      updatedAt: new Date().toISOString(),
+      completedActions: 0,
+      failedActions: 0,
+    };
+    return acc;
+  }, {});
+}
+
+function syncWatchAgents(watchState) {
+  if (!watchState) {
+    return;
+  }
+  const owners = watchOwners(watchState.teamMode, watchState.executionMode);
+  const next = {};
+  for (const owner of owners) {
+    if (watchState.agents && watchState.agents[owner]) {
+      next[owner] = watchState.agents[owner];
+      continue;
+    }
+    next[owner] = {
+      label: ownerLabel(owner),
+      status: 'idle',
+      currentAction: '',
+      updatedAt: new Date().toISOString(),
+      completedActions: 0,
+      failedActions: 0,
+    };
+  }
+  watchState.agents = next;
+}
+
+function ensureWatchState(runId, seed = {}) {
+  if (!runId) {
+    return null;
+  }
+  if (!watchStateByRun.has(runId)) {
+    watchStateByRun.set(runId, {
+      runId,
+      objective: String(seed.objective || ''),
+      state: String(seed.state || 'running'),
+      provider: String(seed.provider || DEFAULT_PROVIDER),
+      model: String(seed.model || ''),
+      workspaceRoot: String(seed.workspaceRoot || ''),
+      teamMode: seed.teamMode === 'solo' ? 'solo' : 'teams',
+      executionMode: normalizeExecutionMode(seed.executionMode || 'action'),
+      agents: defaultWatchAgents(seed.teamMode, seed.executionMode),
+      events: [],
+      createdAt: seed.createdAt || new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+  }
+  const current = watchStateByRun.get(runId);
+  current.executionMode = normalizeExecutionMode(current.executionMode || seed.executionMode || 'action');
+  if (!current.agents || typeof current.agents !== 'object') {
+    current.agents = defaultWatchAgents(current.teamMode, current.executionMode);
+  }
+  syncWatchAgents(current);
+  return current;
+}
+
+function updateWatchAgentState(watchState, event) {
+  if (!watchState) {
+    return;
+  }
+  const fallbackOwner = watchState.executionMode === 'research' ? 'research' : 'engineering';
+  const owner = normalizeOwner(event.owner) || fallbackOwner;
+  if (!watchState.agents[owner]) {
+    watchState.agents[owner] = {
+      label: ownerLabel(owner),
+      status: 'idle',
+      currentAction: '',
+      updatedAt: new Date().toISOString(),
+      completedActions: 0,
+      failedActions: 0,
+    };
+  }
+  const agent = watchState.agents[owner];
+  const now = new Date().toISOString();
+
+  if (event.type === 'run_started' || event.type === 'run_resumed') {
+    const chief = watchState.agents.chief || agent;
+    chief.status = 'working';
+    chief.currentAction = String(event.summary || 'Orchestrating task run.').trim();
+    chief.updatedAt = now;
+    return;
+  }
+  if (event.type === 'planning_started') {
+    const chief = watchState.agents.chief || agent;
+    chief.status = 'planning';
+    chief.currentAction = String(event.summary || 'Planning in progress.').trim();
+    chief.updatedAt = now;
+    return;
+  }
+  if (event.type === 'planning_completed') {
+    const chief = watchState.agents.chief || agent;
+    chief.status = 'idle';
+    chief.currentAction = '';
+    chief.updatedAt = now;
+    return;
+  }
+  if (event.type === 'team_brief_started') {
+    agent.status = 'planning';
+    agent.currentAction = String(event.summary || 'Preparing guidance.').trim();
+    agent.updatedAt = now;
+    return;
+  }
+  if (event.type === 'team_brief') {
+    agent.status = 'planning';
+    agent.currentAction = String(event.summary || '').trim();
+    agent.updatedAt = now;
+    return;
+  }
+  if (event.type === 'team_brief_failed') {
+    agent.status = 'blocked';
+    agent.currentAction = String(event.summary || 'Team brief failed.').trim();
+    agent.updatedAt = now;
+    agent.failedActions += 1;
+    return;
+  }
+  if (event.type === 'login_required') {
+    agent.status = 'awaiting_login';
+    agent.currentAction = String(event.summary || 'Waiting for you to log in in the browser window.').trim();
+    agent.updatedAt = now;
+    return;
+  }
+  if (event.type === 'login_completed') {
+    agent.status = 'working';
+    agent.currentAction = String(event.summary || 'Login completed. Continuing task.').trim();
+    agent.updatedAt = now;
+    return;
+  }
+  if (event.type === 'heartbeat') {
+    const chief = watchState.agents.chief || agent;
+    if (chief.status === 'idle') {
+      chief.status = 'working';
+    }
+    chief.currentAction = String(event.summary || chief.currentAction || 'Working...').trim();
+    chief.updatedAt = now;
+    return;
+  }
+  if (event.type === 'action_started') {
+    agent.status = 'working';
+    agent.currentAction = String(event.intent || '').trim();
+    agent.updatedAt = now;
+    return;
+  }
+  if (event.type === 'action_finished') {
+    agent.status = event.ok ? 'idle' : 'blocked';
+    agent.currentAction = event.ok ? '' : String(event.summary || event.intent || '').trim();
+    agent.updatedAt = now;
+    if (event.ok) {
+      agent.completedActions += 1;
+    } else {
+      agent.failedActions += 1;
+    }
+    return;
+  }
+  if (event.type === 'run_paused') {
+    Object.values(watchState.agents).forEach((item) => {
+      item.status = 'paused';
+      item.updatedAt = now;
+    });
+    return;
+  }
+  if (event.type === 'run_stop_requested') {
+    Object.values(watchState.agents).forEach((item) => {
+      item.status = 'paused';
+      item.updatedAt = now;
+    });
+    if (watchState.agents.chief) {
+      watchState.agents.chief.currentAction = String(event.summary || 'Stopping task...').trim();
+    }
+    return;
+  }
+  if (event.type === 'run_finished') {
+    Object.values(watchState.agents).forEach((item) => {
+      item.status = watchState.state === 'completed' ? 'done' : (watchState.state === 'paused_approval' ? 'paused' : 'idle');
+      item.currentAction = '';
+      item.updatedAt = now;
+    });
+  }
+}
+
+function appendWatchEvent(runId, event, seed = {}) {
+  const watchState = ensureWatchState(runId, seed);
+  if (!watchState) {
+    return null;
+  }
+
+  watchState.objective = String(seed.objective || watchState.objective || '');
+  watchState.state = String(seed.state || watchState.state || 'running');
+  watchState.provider = String(seed.provider || watchState.provider || DEFAULT_PROVIDER);
+  watchState.model = String(seed.model || watchState.model || '');
+  watchState.workspaceRoot = String(seed.workspaceRoot || watchState.workspaceRoot || '');
+  watchState.teamMode = seed.teamMode === 'solo' ? 'solo' : (watchState.teamMode === 'solo' ? 'solo' : 'teams');
+  watchState.executionMode = normalizeExecutionMode(seed.executionMode || watchState.executionMode || 'action');
+  syncWatchAgents(watchState);
+  watchState.updatedAt = new Date().toISOString();
+
+  const payload = {
+    ts: new Date().toISOString(),
+    runId,
+    ...event,
+  };
+  watchState.events.push(payload);
+  if (watchState.events.length > 600) {
+    watchState.events = watchState.events.slice(-600);
+  }
+
+  updateWatchAgentState(watchState, payload);
+  watchStateByRun.set(runId, watchState);
+  return payload;
+}
+
+function broadcastWatchEvent(runId, event, seed = {}) {
+  const payload = appendWatchEvent(runId, event, seed);
+  if (!payload) {
+    return;
+  }
+  for (const win of watchWindows) {
+    if (!win.isDestroyed()) {
+      win.webContents.send('watch:update', payload);
+    }
+  }
+}
+
+function startWatchHeartbeat(runId, seed = {}, summary = 'Working...', intervalMs = 5000) {
+  if (!runId) {
+    return () => {};
+  }
+  let tick = 0;
+  const timer = setInterval(() => {
+    tick += 1;
+    const text = typeof summary === 'function' ? summary(tick) : String(summary || 'Working...');
+    broadcastWatchEvent(runId, {
+      type: 'heartbeat',
+      owner: 'chief',
+      summary: text,
+    }, seed);
+  }, Math.max(1500, intervalMs));
+
+  return () => {
+    clearInterval(timer);
+  };
+}
+
+class StopRequestedError extends Error {
+  constructor(message = 'Run stopped by user.') {
+    super(message);
+    this.name = 'StopRequestedError';
+  }
+}
+
+class BudgetLimitError extends Error {
+  constructor(message = 'Run stopped at budget limit.') {
+    super(message);
+    this.name = 'BudgetLimitError';
+  }
+}
+
+function enforcePerMinuteLimit(hits, limitPerMinute, label) {
+  const now = Date.now();
+  const windowMs = 60 * 1000;
+  while (hits.length > 0 && (now - hits[0]) >= windowMs) {
+    hits.shift();
+  }
+  if (hits.length >= limitPerMinute) {
+    throw new BudgetLimitError(`Stopped at ${label} limit (${limitPerMinute}/minute).`);
+  }
+  hits.push(now);
+}
+
+function registerRunChild(runId, child) {
+  const key = String(runId || '').trim();
+  if (!key || !child) {
+    return;
+  }
+  if (!activeChildrenByRun.has(key)) {
+    activeChildrenByRun.set(key, new Set());
+  }
+  activeChildrenByRun.get(key).add(child);
+}
+
+function unregisterRunChild(runId, child) {
+  const key = String(runId || '').trim();
+  if (!key || !child) {
+    return;
+  }
+  const set = activeChildrenByRun.get(key);
+  if (!set) {
+    return;
+  }
+  set.delete(child);
+  if (set.size === 0) {
+    activeChildrenByRun.delete(key);
+  }
+}
+
+function isRunStopRequested(runId) {
+  const key = String(runId || '').trim();
+  if (!key) {
+    return false;
+  }
+  return stopRequestsByRun.has(key);
+}
+
+function getRunStopReason(runId) {
+  const key = String(runId || '').trim();
+  if (!key) {
+    return '';
+  }
+  return String(stopRequestsByRun.get(key) || '');
+}
+
+function requestRunStop(runId, reason = 'Stopped by user request.') {
+  const key = String(runId || '').trim();
+  if (!key) {
+    return false;
+  }
+  stopRequestsByRun.set(key, reason);
+  const children = activeChildrenByRun.get(key);
+  if (children && children.size > 0) {
+    for (const child of children) {
+      try {
+        if (child && !child.killed) {
+          child.kill('SIGTERM');
+        }
+      } catch {
+        // Ignore kill errors.
+      }
+    }
+  }
+  return true;
+}
+
+function clearRunStopRequest(runId) {
+  const key = String(runId || '').trim();
+  if (!key) {
+    return;
+  }
+  stopRequestsByRun.delete(key);
+}
+
+function throwIfRunStopped(runId) {
+  if (!isRunStopRequested(runId)) {
+    return;
+  }
+  throw new StopRequestedError(getRunStopReason(runId) || 'Run stopped by user request.');
+}
+
+function watchSnapshot(runId) {
+  const current = watchStateByRun.get(runId);
+  if (!current) {
+    return null;
+  }
+  return {
+    runId: current.runId,
+    objective: current.objective,
+    state: current.state,
+    provider: current.provider,
+    model: current.model,
+    workspaceRoot: current.workspaceRoot,
+    teamMode: current.teamMode,
+    executionMode: current.executionMode,
+    agents: current.agents,
+    events: current.events.slice(-300),
+    createdAt: current.createdAt,
+    updatedAt: current.updatedAt,
+  };
+}
+
+function hydrateWatchFromRunState(runState) {
+  const runId = String(runState?.runId || '');
+  if (!runId) {
+    return null;
+  }
+  const watchState = ensureWatchState(runId, {
+    objective: runState.objective,
+    state: runState.state,
+    provider: runState.provider,
+    model: runState.model,
+    workspaceRoot: runState.workspaceRoot,
+    teamMode: runState.teamMode,
+    executionMode: runState.executionMode,
+    createdAt: runState.createdAt,
+  });
+  if (!watchState) {
+    return null;
+  }
+
+  watchState.events = [];
+  watchState.agents = defaultWatchAgents(runState.teamMode, runState.executionMode);
+  const iterations = Array.isArray(runState.iterations) ? runState.iterations : [];
+  for (const iteration of iterations) {
+    const results = Array.isArray(iteration.results) ? iteration.results : [];
+    for (const result of results) {
+      const owner = normalizeOwner(result.owner) || inferOwnerFromAction(result);
+      appendWatchEvent(runId, {
+        type: 'action_finished',
+        iteration: iteration.iteration,
+        owner,
+        intent: result.intent,
+        tool: result.tool,
+        ok: result.ok === true,
+        summary: result.summary,
+      }, {
+        objective: runState.objective,
+        state: runState.state,
+        provider: runState.provider,
+        model: runState.model,
+        workspaceRoot: runState.workspaceRoot,
+        teamMode: runState.teamMode,
+        executionMode: runState.executionMode,
+      });
+    }
+  }
+
+  watchState.state = String(runState.state || watchState.state);
+  watchState.objective = String(runState.objective || watchState.objective);
+  watchState.provider = String(runState.provider || watchState.provider);
+  watchState.model = String(runState.model || watchState.model);
+  watchState.workspaceRoot = String(runState.workspaceRoot || watchState.workspaceRoot);
+  watchState.executionMode = normalizeExecutionMode(runState.executionMode || watchState.executionMode || 'action');
+  syncWatchAgents(watchState);
+  watchState.updatedAt = new Date().toISOString();
+  watchStateByRun.set(runId, watchState);
+  return watchState;
+}
+
+function createWatchWindow(runId = '') {
+  const win = new BrowserWindow({
+    width: 980,
+    height: 680,
+    minWidth: 760,
+    minHeight: 520,
+    title: 'Watch Geepus Task',
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+    },
+  });
+
+  if (runId) {
+    win.loadFile(path.join(__dirname, 'watch.html'), { query: { runId } });
+  } else {
+    win.loadFile(path.join(__dirname, 'watch.html'));
+  }
+  watchWindows.add(win);
+  win.on('closed', () => {
+    watchWindows.delete(win);
+  });
+  return win;
+}
+
+function createWindow() {
+  const win = new BrowserWindow({
+    width: 1100,
+    height: 760,
+    minWidth: 880,
+    minHeight: 640,
+    title: 'Geepus',
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+    },
+  });
+
+  win.loadFile(path.join(__dirname, 'index.html'));
+}
+
+function apiHeaders(provider, apiKey) {
+  if (provider === 'anthropic') {
+    return {
+      'Content-Type': 'application/json',
+      'x-api-key': apiKey,
+      'anthropic-version': '2023-06-01',
+    };
+  }
+
+  return {
+    'Content-Type': 'application/json',
+    Authorization: `Bearer ${apiKey}`,
+  };
+}
+
+async function parseError(response) {
+  const text = await response.text();
+  let message = text;
+
+  try {
+    const json = JSON.parse(text);
+    if (json && json.error && json.error.message) {
+      message = json.error.message;
+    }
+  } catch {
+    // Keep original text
+  }
+
+  return `API request failed (${response.status}): ${message}`;
+}
+
+function extractOutputText(provider, payload) {
+  if (provider === 'anthropic' && Array.isArray(payload.content)) {
+    const parts = payload.content
+      .filter((item) => item && item.type === 'text' && typeof item.text === 'string')
+      .map((item) => item.text.trim())
+      .filter(Boolean);
+    if (parts.length > 0) {
+      return parts.join('\n\n');
+    }
+  }
+
+  if (typeof payload.output_text === 'string' && payload.output_text.trim().length > 0) {
+    return payload.output_text.trim();
+  }
+
+  if (Array.isArray(payload.output)) {
+    const parts = [];
+    for (const item of payload.output) {
+      if (!item || !Array.isArray(item.content)) {
+        continue;
+      }
+      for (const content of item.content) {
+        if (content && typeof content.text === 'string' && content.text.trim().length > 0) {
+          parts.push(content.text.trim());
+        }
+      }
+    }
+    if (parts.length > 0) {
+      return parts.join('\n\n');
+    }
+  }
+
+  return 'No text response returned by the model.';
+}
+
+function toAnthropicMessages(input) {
+  if (typeof input === 'string') {
+    return [{ role: 'user', content: input }];
+  }
+  if (Array.isArray(input)) {
+    return input
+      .filter((entry) => entry && (entry.role === 'system' || entry.role === 'user' || entry.role === 'assistant'))
+      .map((entry) => {
+        if (entry.role === 'system') {
+          return { role: 'user', content: `[System context]\n${entry.content || ''}` };
+        }
+        return {
+          role: entry.role,
+          content: typeof entry.content === 'string' ? entry.content : JSON.stringify(entry.content),
+        };
+      });
+  }
+  return [{ role: 'user', content: String(input || '') }];
+}
+
+function extractSystemPrompt(input) {
+  if (!Array.isArray(input)) {
+    return '';
+  }
+  return input
+    .filter((entry) => entry && entry.role === 'system' && typeof entry.content === 'string')
+    .map((entry) => entry.content.trim())
+    .filter(Boolean)
+    .join('\n\n');
+}
+
+async function listModels(provider, apiKey, baseUrl) {
+  const url = `${normalizeBaseUrl(baseUrl, provider)}/models`;
+  const response = await fetch(url, {
+    method: 'GET',
+    headers: apiHeaders(provider, apiKey),
+  });
+
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+
+  const json = await response.json();
+  const ids = Array.isArray(json.data) ? json.data.map((item) => item.id) : [];
+  return normalizeModelList(ids, provider);
+}
+
+async function callProviderResponse({
+  provider,
+  apiKey,
+  baseUrl,
+  model,
+  input,
+  temperature = 0.2,
+}) {
+  const resolvedProvider = normalizeProvider(provider);
+  const resolvedBaseUrl = normalizeBaseUrl(baseUrl, resolvedProvider);
+
+  const response = await fetch(
+    resolvedProvider === 'anthropic' ? `${resolvedBaseUrl}/messages` : `${resolvedBaseUrl}/responses`,
+    {
+      method: 'POST',
+      headers: apiHeaders(resolvedProvider, apiKey),
+      body: JSON.stringify(
+        resolvedProvider === 'anthropic'
+          ? {
+            model,
+            temperature,
+            max_tokens: 4096,
+            system: extractSystemPrompt(input) || undefined,
+            messages: toAnthropicMessages(input),
+          }
+          : {
+            model,
+            input,
+            temperature,
+          },
+      ),
+    },
+  );
+
+  if (!response.ok) {
+    throw new Error(await parseError(response));
+  }
+
+  return response.json();
+}
+
+function isModelAccessError(error) {
+  const message = String(error?.message || error).toLowerCase();
+  return (
+    message.includes('does not have access to model') ||
+    message.includes('model_not_found') ||
+    message.includes('no model named') ||
+    message.includes('permission denied for model') ||
+    message.includes('not_found_error')
+  );
+}
+
+async function callResponsesWithFallback({ settings, model, input, temperature, callGuards = null }) {
+  if (callGuards && typeof callGuards.beforeModelCall === 'function') {
+    callGuards.beforeModelCall();
+  }
+  try {
+    const payload = await callProviderResponse({
+      provider: settings.provider,
+      apiKey: settings.apiKey,
+      baseUrl: settings.baseUrl,
+      model,
+      input,
+      temperature,
+    });
+    return { payload, model, switchedModel: false };
+  } catch (error) {
+    if (!isModelAccessError(error)) {
+      throw error;
+    }
+
+    const models = await listModels(settings.provider, settings.apiKey, settings.baseUrl);
+    const fallback = models.find((candidate) => candidate !== model) || models[0];
+
+    if (!fallback || fallback === model) {
+      throw error;
+    }
+
+    if (callGuards && typeof callGuards.beforeModelCall === 'function') {
+      callGuards.beforeModelCall();
+    }
+    const payload = await callProviderResponse({
+      provider: settings.provider,
+      apiKey: settings.apiKey,
+      baseUrl: settings.baseUrl,
+      model: fallback,
+      input,
+      temperature,
+    });
+
+    await writeSettings({ ...settings, model: fallback });
+    return { payload, model: fallback, switchedModel: true };
+  }
+}
+
+function truncate(text, maxLength = 8000) {
+  const value = String(text || '');
+  if (value.length <= maxLength) {
+    return value;
+  }
+  return `${value.slice(0, maxLength)}\n...[truncated]`;
+}
+
+function normalizeRisk(rawRisk) {
+  const value = String(rawRisk || '').toLowerCase();
+  if (value === 'low' || value === 'medium' || value === 'high') {
+    return value;
+  }
+  return 'medium';
+}
+
+function ensureObject(value) {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+}
+
+function resolveWorkspaceRoot(workspaceRoot) {
+  const resolved = path.resolve(normalizeWorkspaceRoot(workspaceRoot));
+  if (!fsSync.existsSync(resolved)) {
+    throw new Error(`Workspace folder not found: ${resolved}`);
+  }
+  const stat = fsSync.statSync(resolved);
+  if (!stat.isDirectory()) {
+    throw new Error(`Workspace must be a folder: ${resolved}`);
+  }
+  return resolved;
+}
+
+function isSensitivePath(absolutePath) {
+  const lower = absolutePath.toLowerCase();
+  const blockedParts = [
+    `${path.sep}.ssh${path.sep}`,
+    `${path.sep}.aws${path.sep}`,
+    `${path.sep}.gnupg${path.sep}`,
+    `${path.sep}library${path.sep}keychains${path.sep}`,
+    `${path.sep}private${path.sep}var${path.sep}db${path.sep}`,
+  ];
+  return blockedParts.some((segment) => lower.includes(segment));
+}
+
+function resolveWorkspacePath(workspaceRoot, requestedPath) {
+  if (typeof requestedPath !== 'string' || requestedPath.trim().length === 0) {
+    throw new Error('Missing file path.');
+  }
+
+  const target = requestedPath.trim();
+  const absolute = path.isAbsolute(target)
+    ? path.resolve(target)
+    : path.resolve(workspaceRoot, target);
+
+  if (!(absolute === workspaceRoot || absolute.startsWith(`${workspaceRoot}${path.sep}`))) {
+    throw new Error(`Path is outside workspace: ${target}`);
+  }
+
+  if (isSensitivePath(absolute)) {
+    throw new Error(`Path blocked by policy: ${target}`);
+  }
+
+  return absolute;
+}
+
+async function listWorkspaceFiles(root, maxDepth = 3, maxItems = 300) {
+  const ignore = new Set(['.git', 'node_modules', 'dist', '.build', '.next', 'DerivedData']);
+  const output = [];
+
+  async function walk(current, depth) {
+    if (output.length >= maxItems || depth > maxDepth) {
+      return;
+    }
+    let entries = [];
+    try {
+      entries = await fs.readdir(current, { withFileTypes: true });
+    } catch {
+      return;
+    }
+
+    entries.sort((a, b) => a.name.localeCompare(b.name));
+    for (const entry of entries) {
+      if (output.length >= maxItems) {
+        return;
+      }
+      if (ignore.has(entry.name)) {
+        continue;
+      }
+      if (entry.name.startsWith('.') && entry.name !== '.claude' && entry.name !== '.geepus') {
+        continue;
+      }
+
+      const absolute = path.join(current, entry.name);
+      const relative = path.relative(root, absolute) || '.';
+      output.push(entry.isDirectory() ? `${relative}/` : relative);
+
+      if (entry.isDirectory()) {
+        await walk(absolute, depth + 1);
+      }
+    }
+  }
+
+  await walk(root, 0);
+  return output;
+}
+
+function extractFirstJSONObject(text) {
+  const input = String(text || '');
+  let start = -1;
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+
+  for (let index = 0; index < input.length; index += 1) {
+    const char = input[index];
+
+    if (start === -1) {
+      if (char === '{') {
+        start = index;
+        depth = 1;
+      }
+      continue;
+    }
+
+    if (inString) {
+      if (escape) {
+        escape = false;
+      } else if (char === '\\') {
+        escape = true;
+      } else if (char === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (char === '"') {
+      inString = true;
+      continue;
+    }
+
+    if (char === '{') {
+      depth += 1;
+    } else if (char === '}') {
+      depth -= 1;
+      if (depth === 0) {
+        return input.slice(start, index + 1);
+      }
+    }
+  }
+
+  return null;
+}
+
+function isLikelyRefusal(text) {
+  const value = String(text || '').toLowerCase();
+  const phrases = [
+    "i'm unable",
+    'i am unable',
+    "i can't",
+    'i cannot',
+    'as an ai',
+    'i do not have access',
+    'i don’t have access',
+    'i can guide you',
+  ];
+  return phrases.some((phrase) => value.includes(phrase));
+}
+
+function normalizeOwner(rawOwner) {
+  const value = String(rawOwner || '').trim().toLowerCase();
+  if (TEAM_OWNER_ORDER.includes(value)) {
+    return value;
+  }
+  return '';
+}
+
+function inferOwnerFromAction(action) {
+  const intent = String(action.intent || '').toLowerCase();
+  const tool = String(action.tool || '').toLowerCase();
+
+  if (
+    intent.includes('research')
+    || intent.includes('investigate')
+    || intent.includes('benchmark')
+    || intent.includes('compare options')
+  ) {
+    return 'research';
+  }
+  if (
+    intent.includes('strategy')
+    || intent.includes('go-to-market')
+    || intent.includes('positioning')
+    || intent.includes('roadmap strategy')
+  ) {
+    return 'strategist';
+  }
+  if (
+    intent.includes('orchestrate')
+    || intent.includes('delegate')
+    || intent.includes('handoff')
+    || intent.includes('chief of staff')
+  ) {
+    return 'chief';
+  }
+  if (
+    tool === 'run_playwright'
+    || intent.includes('qa')
+    || intent.includes('test')
+    || intent.includes('lint')
+    || intent.includes('verify')
+    || intent.includes('review')
+  ) {
+    return 'qa';
+  }
+  if (
+    intent.includes('ux')
+    || intent.includes('ui')
+    || intent.includes('design')
+    || intent.includes('copy')
+    || intent.includes('style')
+  ) {
+    return 'design';
+  }
+  if (
+    intent.includes('plan')
+    || intent.includes('scope')
+    || intent.includes('requirements')
+    || intent.includes('milestone')
+    || intent.includes('roadmap')
+    || intent.includes('prioritize')
+  ) {
+    return 'product';
+  }
+  return 'engineering';
+}
+
+function ownerLabel(owner) {
+  return TEAM_OWNER_LABELS[owner] || TEAM_OWNER_LABELS.engineering;
+}
+
+function normalizeAction(rawAction) {
+  const action = ensureObject(rawAction);
+  const owner = normalizeOwner(action.owner) || inferOwnerFromAction(action);
+  return {
+    intent: String(action.intent || '').trim() || 'Execute requested task',
+    owner,
+    tool: String(action.tool || '').trim(),
+    exact_args: ensureObject(action.exact_args),
+    expected_diff: String(action.expected_diff || '').trim(),
+    rollback_plan: String(action.rollback_plan || '').trim() || 'Restore previous state from backup/snapshot.',
+    risk_level: normalizeRisk(action.risk_level),
+  };
+}
+
+function normalizePlan(rawPlan) {
+  const plan = ensureObject(rawPlan);
+  const actions = Array.isArray(plan.actions) ? plan.actions.map(normalizeAction) : [];
+
+  if (actions.length === 0) {
+    throw new Error('Model did not return any executable actions.');
+  }
+
+  return {
+    summary: String(plan.summary || plan.intent || 'Agent execution plan').trim(),
+    actions,
+  };
+}
+
+function commandPolicy(command, args) {
+  const blockedCommands = new Set([
+    'sudo',
+    'su',
+    'launchctl',
+    'osascript',
+    'security',
+    'ssh',
+    'scp',
+    'curl',
+    'wget',
+    'rm',
+    'dd',
+    'diskutil',
+    'chmod',
+    'chown',
+  ]);
+
+  if (!/^[a-zA-Z0-9._-]+$/.test(command)) {
+    return { allowed: false, risk: 'high', reason: `Invalid command token: ${command}` };
+  }
+  if (blockedCommands.has(command)) {
+    return { allowed: false, risk: 'high', reason: `Command blocked by policy: ${command}` };
+  }
+
+  if (command === 'git') {
+    const sub = String(args[0] || '');
+    if (sub === 'push') {
+      return { allowed: false, risk: 'high', reason: 'git push is blocked by policy.' };
+    }
+    const lowRisk = new Set(['status', 'diff', 'log', 'branch']);
+    const mediumRisk = new Set(['add', 'commit', 'checkout', 'switch', 'restore', 'merge', 'stash']);
+    if (lowRisk.has(sub)) {
+      return { allowed: true, risk: 'low', reason: 'Safe git read operation.' };
+    }
+    if (mediumRisk.has(sub)) {
+      return { allowed: true, risk: 'medium', reason: 'Git write operation requires approval.' };
+    }
+    return { allowed: false, risk: 'high', reason: `Unsupported git subcommand: ${sub}` };
+  }
+
+  if (command === 'swift' && (args[0] === 'build' || args[0] === 'test')) {
+    return { allowed: true, risk: 'low', reason: 'Swift build/test command.' };
+  }
+
+  if (command === 'npm') {
+    if (args[0] === 'test' || (args[0] === 'run' && ['test', 'build', 'lint', 'start', 'dev'].includes(args[1]))) {
+      return { allowed: true, risk: 'low', reason: 'NPM test/build/lint command.' };
+    }
+    if (args[0] === 'install' || args[0] === 'ci' || args[0] === 'create' || args[0] === 'init') {
+      return { allowed: true, risk: 'medium', reason: 'Dependency install command requires approval.' };
+    }
+    return { allowed: false, risk: 'high', reason: `Unsupported npm command: npm ${args.join(' ')}` };
+  }
+
+  if (command === 'pnpm' || command === 'yarn') {
+    if (args[0] === 'test' || (args[0] === 'run' && ['test', 'build', 'lint', 'start', 'dev'].includes(args[1]))) {
+      return { allowed: true, risk: 'low', reason: `${command} test/build/lint command.` };
+    }
+    if (args[0] === 'install' || args[0] === 'create' || args[0] === 'init') {
+      return { allowed: true, risk: 'medium', reason: 'Dependency install command requires approval.' };
+    }
+    return { allowed: false, risk: 'high', reason: `Unsupported ${command} command.` };
+  }
+
+  if (command === 'npx') {
+    const packageName = String(args[0] || '');
+    if (!/^[a-zA-Z0-9@._/-]+$/.test(packageName)) {
+      return { allowed: false, risk: 'high', reason: `Unsupported npx package token: ${packageName}` };
+    }
+    return { allowed: true, risk: 'medium', reason: 'npx command requires approval.' };
+  }
+
+  if (command === 'open') {
+    if (!Array.isArray(args) || args.length === 0) {
+      return { allowed: false, risk: 'high', reason: 'open requires a target URL or file path.' };
+    }
+    if (args.some((value) => String(value).startsWith('-'))) {
+      return { allowed: false, risk: 'high', reason: 'open flags are not allowed by policy.' };
+    }
+    return { allowed: true, risk: 'medium', reason: 'Open URL or workspace file in browser/app.' };
+  }
+
+  if (['ls', 'pwd', 'cat', 'find', 'head', 'tail', 'wc'].includes(command)) {
+    return { allowed: true, risk: 'low', reason: 'Read-only shell command.' };
+  }
+
+  if (['mkdir', 'touch', 'cp', 'mv'].includes(command)) {
+    return { allowed: true, risk: 'medium', reason: 'File system write command requires approval.' };
+  }
+
+  if (['node', 'python', 'python3'].includes(command)) {
+    return { allowed: true, risk: 'medium', reason: 'Script execution requires approval.' };
+  }
+
+  return { allowed: false, risk: 'high', reason: `Command not allowlisted: ${command}` };
+}
+
+function withMinimumRisk(baseRisk, minimumRisk) {
+  const order = ['low', 'medium', 'high'];
+  return order.indexOf(baseRisk) >= order.indexOf(minimumRisk) ? baseRisk : minimumRisk;
+}
+
+function evaluateActionPolicy(action) {
+  const tool = action.tool;
+
+  if (tool === 'list_files' || tool === 'read_file') {
+    return { allowed: true, effectiveRisk: withMinimumRisk(action.risk_level, 'low'), reason: 'Read-only file action.' };
+  }
+
+  if (tool === 'write_file' || tool === 'append_file') {
+    return { allowed: true, effectiveRisk: withMinimumRisk(action.risk_level, 'medium'), reason: 'File write action.' };
+  }
+
+  if (tool === 'run_command') {
+    const command = String(action.exact_args.command || '').trim();
+    const args = Array.isArray(action.exact_args.args)
+      ? action.exact_args.args.map((value) => String(value))
+      : [];
+    const policy = commandPolicy(command, args);
+    if (!policy.allowed) {
+      return { allowed: false, effectiveRisk: 'high', reason: policy.reason };
+    }
+    return {
+      allowed: true,
+      effectiveRisk: withMinimumRisk(action.risk_level, policy.risk),
+      reason: policy.reason,
+    };
+  }
+
+  if (tool === 'run_playwright') {
+    return {
+      allowed: true,
+      effectiveRisk: withMinimumRisk(action.risk_level, 'medium'),
+      reason: 'Playwright browser automation requires approval.',
+    };
+  }
+
+  return { allowed: false, effectiveRisk: 'high', reason: `Unsupported tool: ${tool}` };
+}
+
+async function runCommand({
+  command,
+  args,
+  cwd,
+  timeoutMs = 180000,
+  runId = '',
+}) {
+  return new Promise((resolve, reject) => {
+    if (isRunStopRequested(runId)) {
+      reject(new StopRequestedError(getRunStopReason(runId) || 'Run stopped by user.'));
+      return;
+    }
+
+    const child = spawn(command, args, {
+      cwd,
+      shell: false,
+      env: {
+        ...process.env,
+        CI: '1',
+      },
+    });
+    registerRunChild(runId, child);
+
+    let stdout = '';
+    let stderr = '';
+    let timedOut = false;
+    let stopRequested = false;
+
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill('SIGTERM');
+    }, Math.max(1000, Math.min(timeoutMs, 600000)));
+
+    const stopTimer = runId
+      ? setInterval(() => {
+        if (isRunStopRequested(runId) && !child.killed) {
+          stopRequested = true;
+          child.kill('SIGTERM');
+        }
+      }, 300)
+      : null;
+
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk.toString();
+      if (stdout.length > 120000) {
+        stdout = `${stdout.slice(0, 120000)}\n...[truncated]`;
+      }
+    });
+
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk.toString();
+      if (stderr.length > 120000) {
+        stderr = `${stderr.slice(0, 120000)}\n...[truncated]`;
+      }
+    });
+
+    child.on('error', (error) => {
+      clearTimeout(timer);
+      if (stopTimer) clearInterval(stopTimer);
+      unregisterRunChild(runId, child);
+      reject(error);
+    });
+
+    child.on('close', (exitCode, signal) => {
+      clearTimeout(timer);
+      if (stopTimer) clearInterval(stopTimer);
+      unregisterRunChild(runId, child);
+      resolve({
+        exitCode: exitCode ?? null,
+        signal: signal || null,
+        timedOut,
+        stopped: stopRequested || isRunStopRequested(runId),
+        stdout,
+        stderr,
+      });
+    });
+  });
+}
+
+function sanitizeProfileName(rawName) {
+  const value = String(rawName || 'default').trim().toLowerCase();
+  const cleaned = value.replace(/[^a-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '');
+  return cleaned || 'default';
+}
+
+async function pageHasSelector(page, selector) {
+  const query = String(selector || '').trim();
+  if (!query) {
+    return false;
+  }
+  try {
+    const handle = await page.$(query);
+    return Boolean(handle);
+  } catch {
+    return false;
+  }
+}
+
+async function isLikelyLoginPage(page) {
+  const currentUrl = String(page.url() || '').toLowerCase();
+  if (/(signin|sign-in|log-in|login|auth)/.test(currentUrl)) {
+    return true;
+  }
+
+  const selectors = [
+    'input[type="password"]',
+    'input[name*="password" i]',
+    'form[action*="login" i]',
+    'form[action*="signin" i]',
+    'a[href*="login" i]',
+    'a[href*="signin" i]',
+  ];
+  for (const selector of selectors) {
+    if (await pageHasSelector(page, selector)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+async function waitForManualLogin({
+  page,
+  runId = '',
+  loginSuccessSelector = '',
+  postLoginUrlContains = '',
+  timeoutMs = 300000,
+}) {
+  const startedAt = Date.now();
+  const successSelector = String(loginSuccessSelector || '').trim();
+  const expectedUrlToken = String(postLoginUrlContains || '').trim().toLowerCase();
+
+  while ((Date.now() - startedAt) < timeoutMs) {
+    throwIfRunStopped(runId);
+    const currentUrl = String(page.url() || '').toLowerCase();
+    const hasLoginSignals = await isLikelyLoginPage(page);
+    const successBySelector = successSelector
+      ? await pageHasSelector(page, successSelector)
+      : !hasLoginSignals;
+    const successByUrl = expectedUrlToken ? currentUrl.includes(expectedUrlToken) : true;
+    if (successBySelector && successByUrl) {
+      return true;
+    }
+    await page.waitForTimeout(1000);
+  }
+
+  return false;
+}
+
+async function runPlaywrightTool(args, workspaceRoot, runId = '') {
+  throwIfRunStopped(runId);
+  const url = String(args.url || '').trim();
+  if (!/^https?:\/\//i.test(url)) {
+    throw new Error(`Playwright requires http/https URL. Received: ${url}`);
+  }
+
+  let playwright;
+  try {
+    // eslint-disable-next-line global-require, import/no-extraneous-dependencies
+    playwright = require('playwright');
+  } catch {
+    throw new Error('Playwright is not installed. Run: npm install playwright');
+  }
+
+  const timeoutMs = clampNumber(Number(args.timeout_ms || 90000), 1000, 240000, 90000);
+  const interactiveLogin = args.interactive_login === true;
+  const autoPromptLogin = args.auto_prompt_login !== false;
+  const loginWaitMs = clampNumber(Number(args.login_wait_ms || 300000), 15000, 900000, 300000);
+  const loginSuccessSelector = typeof args.login_success_selector === 'string' ? args.login_success_selector.trim() : '';
+  const postLoginUrlContains = typeof args.post_login_url_contains === 'string' ? args.post_login_url_contains.trim() : '';
+  const initialHeadless = interactiveLogin ? false : (args.headless !== false);
+  const profileName = sanitizeProfileName(args.profile_name || 'default');
+  const profileDir = path.join(app.getPath('userData'), 'browser-profiles', profileName);
+  await fs.mkdir(profileDir, { recursive: true });
+
+  const launchPersistentContext = async (headless) => playwright.chromium.launchPersistentContext(profileDir, {
+    headless,
+  });
+  let contextIsHeadless = initialHeadless;
+  let context = await launchPersistentContext(contextIsHeadless);
+
+  let page = context.pages()[0] || await context.newPage();
+  let loginPrompted = false;
+  let loginCompleted = false;
+  const eventOwner = normalizeOwner(args.owner) || 'research';
+
+  try {
+    await page.goto(url, {
+      waitUntil: 'domcontentloaded',
+      timeout: timeoutMs,
+    });
+    throwIfRunStopped(runId);
+
+    const ensureHeadedContext = async () => {
+      if (!contextIsHeadless) {
+        return;
+      }
+      const reopenUrl = String(page.url() || url).trim() || url;
+      try {
+        await context.close();
+      } catch {
+        // Ignore close errors.
+      }
+      context = await launchPersistentContext(false);
+      contextIsHeadless = false;
+      page = context.pages()[0] || await context.newPage();
+      await page.goto(reopenUrl, {
+        waitUntil: 'domcontentloaded',
+        timeout: timeoutMs,
+      });
+    };
+
+    const maybePromptLogin = async (reason = 'Login required to continue browser automation.') => {
+      loginPrompted = true;
+      await ensureHeadedContext();
+      if (runId) {
+        broadcastWatchEvent(runId, {
+          type: 'login_required',
+          owner: eventOwner,
+          summary: reason,
+        }, {
+          state: 'running',
+          workspaceRoot,
+        });
+      }
+      const ok = await waitForManualLogin({
+        page,
+        runId,
+        loginSuccessSelector,
+        postLoginUrlContains,
+        timeoutMs: loginWaitMs,
+      });
+      if (!ok) {
+        throw new Error('Login required but not completed in time. Please run again and finish login when prompted.');
+      }
+      loginCompleted = true;
+      if (runId) {
+        broadcastWatchEvent(runId, {
+          type: 'login_completed',
+          owner: eventOwner,
+          summary: 'Login detected. Continuing automation.',
+        }, {
+          state: 'running',
+          workspaceRoot,
+        });
+      }
+    };
+
+    if (interactiveLogin && (await isLikelyLoginPage(page))) {
+      await maybePromptLogin('Please complete login in the opened browser window.');
+    }
+
+    if (typeof args.wait_for_selector === 'string' && args.wait_for_selector.trim().length > 0) {
+      try {
+        await page.waitForSelector(args.wait_for_selector.trim(), { timeout: timeoutMs });
+      } catch (error) {
+        const loginLikely = await isLikelyLoginPage(page);
+        if (loginLikely && (interactiveLogin || autoPromptLogin)) {
+          await maybePromptLogin('Please log in to continue this task.');
+          await page.waitForSelector(args.wait_for_selector.trim(), { timeout: timeoutMs });
+        } else {
+          throw error;
+        }
+      }
+    }
+    throwIfRunStopped(runId);
+
+    const title = await page.title();
+    const finalUrl = page.url();
+    const h1 = await page.$$eval('h1', (nodes) => nodes
+      .map((node) => (node.textContent || '').trim())
+      .filter(Boolean)
+      .slice(0, 8));
+    const links = await page.$$eval('a[href]', (nodes) => nodes
+      .map((node) => ({
+        text: (node.textContent || '').trim(),
+        href: node.getAttribute('href') || '',
+      }))
+      .filter((item) => item.href)
+      .slice(0, 20));
+
+    let extractedText = '';
+    if (typeof args.extract_selector === 'string' && args.extract_selector.trim().length > 0) {
+      try {
+        extractedText = await page.$eval(
+          args.extract_selector.trim(),
+          (node) => (node.textContent || '').trim(),
+        );
+      } catch {
+        extractedText = '';
+      }
+    }
+
+    let screenshotPath = '';
+    if (typeof args.screenshot_path === 'string' && args.screenshot_path.trim().length > 0) {
+      const target = resolveWorkspacePath(workspaceRoot, args.screenshot_path.trim());
+      await fs.mkdir(path.dirname(target), { recursive: true });
+      await page.screenshot({
+        path: target,
+        fullPage: args.full_page !== false,
+      });
+      screenshotPath = path.relative(workspaceRoot, target);
+    }
+    throwIfRunStopped(runId);
+
+    return {
+      ok: true,
+      summary: `Browsed ${finalUrl}`,
+      output: JSON.stringify({
+        url: finalUrl,
+        title,
+        h1,
+        links,
+        extractedText,
+        screenshotPath,
+        loginPrompted,
+        loginCompleted,
+      }, null, 2),
+    };
+  } finally {
+    await context.close();
+  }
+}
+
+async function executeAction(action, workspaceRoot, runId = '') {
+  throwIfRunStopped(runId);
+  const tool = action.tool;
+  const args = action.exact_args;
+  const owner = normalizeOwner(action.owner) || inferOwnerFromAction(action);
+
+  if (tool === 'list_files') {
+    const target = resolveWorkspacePath(workspaceRoot, String(args.path || '.'));
+    const maxDepth = Number.isInteger(args.max_depth) ? Math.min(Math.max(args.max_depth, 0), 5) : 2;
+    const files = await listWorkspaceFiles(target, maxDepth, 250);
+    return {
+      ok: true,
+      summary: `Listed ${files.length} entries in ${path.relative(workspaceRoot, target) || '.'}`,
+      output: files.join('\n'),
+      metadata: {
+        path: path.relative(workspaceRoot, target) || '.',
+        kind: 'directory-list',
+      },
+    };
+  }
+
+  if (tool === 'read_file') {
+    const target = resolveWorkspacePath(workspaceRoot, String(args.path || ''));
+    const buffer = await fs.readFile(target);
+    if (buffer.length > 300000) {
+      throw new Error(`File too large to read safely: ${path.relative(workspaceRoot, target)}`);
+    }
+    return {
+      ok: true,
+      summary: `Read ${path.relative(workspaceRoot, target)}`,
+      output: buffer.toString('utf8'),
+      metadata: {
+        path: path.relative(workspaceRoot, target),
+        kind: 'file-read',
+      },
+    };
+  }
+
+  if (tool === 'write_file' || tool === 'append_file') {
+    const target = resolveWorkspacePath(workspaceRoot, String(args.path || ''));
+    const content = String(args.content || '');
+    let before = '';
+    let existed = false;
+
+    try {
+      before = await fs.readFile(target, 'utf8');
+      existed = true;
+    } catch {
+      existed = false;
+    }
+
+    await fs.mkdir(path.dirname(target), { recursive: true });
+    if (tool === 'write_file') {
+      await fs.writeFile(target, content, 'utf8');
+    } else {
+      await fs.appendFile(target, content, 'utf8');
+    }
+
+    return {
+      ok: true,
+      summary: `${tool === 'write_file' ? 'Wrote' : 'Appended'} ${path.relative(workspaceRoot, target)}`,
+      output: tool === 'write_file'
+        ? `Previous length: ${before.length}, New length: ${content.length}`
+        : `Appended length: ${content.length}`,
+      rollback: existed
+        ? `Restore previous file content for ${path.relative(workspaceRoot, target)} (${before.length} chars).`
+        : `Delete created file ${path.relative(workspaceRoot, target)}.`,
+      metadata: {
+        path: path.relative(workspaceRoot, target),
+        kind: tool === 'write_file' ? 'file-write' : 'file-append',
+      },
+    };
+  }
+
+  if (tool === 'run_command') {
+    const command = String(args.command || '').trim();
+    const commandArgs = Array.isArray(args.args) ? args.args.map((value) => String(value)) : [];
+    const commandPolicyResult = commandPolicy(command, commandArgs);
+    if (!commandPolicyResult.allowed) {
+      throw new Error(commandPolicyResult.reason);
+    }
+
+    // Keep "open" safe: only allow http(s) URLs or files inside workspace.
+    if (command === 'open') {
+      if (commandArgs.length === 0) {
+        throw new Error('open requires a target URL or file path.');
+      }
+      if (commandArgs.some((value) => String(value).startsWith('-'))) {
+        throw new Error('open flags are not allowed by policy.');
+      }
+      const target = String(commandArgs[0] || '').trim();
+      if (/^https?:\/\//i.test(target)) {
+        // URL target allowed.
+      } else if (/^file:\/\//i.test(target)) {
+        const localPath = decodeURI(target.replace(/^file:\/\//i, ''));
+        const resolved = resolveWorkspacePath(workspaceRoot, localPath);
+        commandArgs[0] = resolved;
+      } else {
+        const resolved = resolveWorkspacePath(workspaceRoot, target);
+        commandArgs[0] = resolved;
+      }
+    }
+
+    const requestedCwd = typeof args.cwd === 'string' && args.cwd.trim().length > 0 ? args.cwd : '.';
+    const cwd = resolveWorkspacePath(workspaceRoot, requestedCwd);
+    const timeoutMs = Number.isInteger(args.timeout_ms) ? args.timeout_ms : 180000;
+    const result = await runCommand({
+      command,
+      args: commandArgs,
+      cwd,
+      timeoutMs,
+      runId,
+    });
+    if (result.stopped) {
+      throw new StopRequestedError(getRunStopReason(runId) || 'Run stopped by user request.');
+    }
+
+    const discoveryCommands = new Set(['find', 'ls', 'pwd', 'cat', 'head', 'tail', 'wc']);
+    const hasUsefulOutput = (result.stdout || '').trim().length > 0;
+    const nonFatalDiscoveryFailure = discoveryCommands.has(command) && !result.timedOut && hasUsefulOutput;
+
+    return {
+      ok: (result.exitCode === 0 && !result.timedOut) || nonFatalDiscoveryFailure,
+      summary: `Ran ${command} ${commandArgs.join(' ')}`.trim(),
+      output: [
+        `cwd: ${path.relative(workspaceRoot, cwd) || '.'}`,
+        `exitCode: ${result.exitCode}`,
+        nonFatalDiscoveryFailure ? 'nonFatal: true (discovery command returned partial results)' : '',
+        result.timedOut ? 'timedOut: true' : '',
+        result.stdout ? `stdout:\n${truncate(result.stdout, 3000)}` : '',
+        result.stderr ? `stderr:\n${truncate(result.stderr, 3000)}` : '',
+      ].filter(Boolean).join('\n\n'),
+      metadata: {
+        command,
+        args: commandArgs,
+        cwd: path.relative(workspaceRoot, cwd) || '.',
+        kind: 'command',
+      },
+    };
+  }
+
+  if (tool === 'run_playwright') {
+    const outcome = await runPlaywrightTool({
+      ...args,
+      owner,
+    }, workspaceRoot, runId);
+    return {
+      ...outcome,
+      metadata: {
+        kind: 'playwright',
+        url: String(args.url || ''),
+      },
+    };
+  }
+
+  throw new Error(`Unsupported tool: ${tool}`);
+}
+
+function buildAgentPlannerPrompt({
+  task,
+  rootObjective = '',
+  workspaceRoot,
+  workspaceFiles,
+  memoryNotes = '',
+  globalMemoryNotes = '',
+  discoveryNotes = '',
+  skillNotes = '',
+  teamBrief = '',
+  teamMode = 'teams',
+  objectivePolicy = null,
+}) {
+  const policy = objectivePolicy || detectObjectivePolicy(rootObjective || task);
+  const policyNotes = objectivePolicyPrompt(policy);
+  const allowedOwners = Array.from(allowedOwnersForPolicy(policy));
+  const ownerEnum = allowedOwners.join('|');
+  const roleLineByOwner = {
+    chief: 'Chief of Staff chooses which specialists are needed and orchestrates sequencing.',
+    strategist: 'Strategist shapes approach, milestones, and tradeoffs.',
+    research: 'Research Lead gathers references, constraints, and market/technical context.',
+    product: 'Product Lead sets milestones and acceptance criteria.',
+    design: 'Design Lead defines UX/UI requirements.',
+    engineering: 'Engineering Lead defines implementation sequencing.',
+    qa: 'QA Lead defines verification and release checks.',
+  };
+  const teamRoleLines = allowedOwners
+    .map((owner) => roleLineByOwner[owner])
+    .filter(Boolean)
+    .map((line) => `- ${line}`);
+  const teamBlock = teamMode === 'teams'
+    ? [
+      '',
+      'Team context (Claude-style teams):',
+      ...teamRoleLines,
+      teamBrief ? `Team outputs:\n${teamBrief}` : 'No team outputs yet.',
+    ].join('\n')
+    : '';
+
+  return [
+    'You are Geepus, an execution planner for a coding agent team (Planner, Builder, Reviewer).',
+    'Return ONLY valid JSON. Do not wrap in markdown.',
+    'Create a practical action list Geepus can execute in order.',
+    '',
+    'JSON schema:',
+    '{',
+    '  "summary": "string",',
+    '  "actions": [',
+    '    {',
+    '      "intent": "string",',
+    `      "owner": "${ownerEnum}",`,
+    '      "tool": "list_files|read_file|write_file|append_file|run_command|run_playwright",',
+    '      "exact_args": { ... },',
+    '      "expected_diff": "string",',
+    '      "rollback_plan": "string",',
+    '      "risk_level": "low|medium|high"',
+    '    }',
+    '  ]',
+    '}',
+    '',
+    'Tool argument requirements:',
+    '- list_files: {"path":"relative/path","max_depth":2}',
+    '- read_file: {"path":"relative/path"}',
+    '- write_file: {"path":"relative/path","content":"full file content"}',
+    '- append_file: {"path":"relative/path","content":"text to append"}',
+    '- run_command: {"command":"npm|pnpm|yarn|npx|swift|git|ls|pwd|cat|find|head|tail|wc|mkdir|touch|cp|mv|node|python3|open","args":["..."],"cwd":"relative/path","timeout_ms":180000}',
+    '- run_playwright: {"url":"https://...","wait_for_selector":"optional css selector","extract_selector":"optional css selector","screenshot_path":"artifacts/page.png","headless":true,"interactive_login":false,"auto_prompt_login":true,"login_success_selector":"optional css selector","post_login_url_contains":"optional url token","login_wait_ms":300000,"profile_name":"default"}',
+    '',
+    'Policy constraints:',
+    '- Workspace root only.',
+    '- No sudo, ssh, launchctl, osascript, security, rm, curl, wget.',
+    '- No git push.',
+    '- Prefer small, verifiable steps.',
+    '- Include tests/lint commands when changing code.',
+    '- Never say you cannot edit files; the external executor performs actions.',
+    '- If context is missing, first actions should inspect files (list_files/read_file).',
+    '- If team mode is enabled, use the correct specialist roles for this objective.',
+    '- Prefer run_playwright for automated browser verification; use open only when explicitly asked to launch UI.',
+    '- If a site may require authentication, set run_playwright.interactive_login=true and include login_success_selector when possible.',
+    '- Avoid broad recursive searches that scan an entire home directory; target known paths first.',
+    '- If known artifact paths are provided, inspect those before creating new files.',
+    `- Always assign each action to one allowed owner: ${allowedOwners.join(', ')}.`,
+    '- Stay strictly on the current objective. Do not continue prior unrelated tasks.',
+    policyNotes ? policyNotes : '',
+    (policy.researchOnly || policy.noBuild)
+      ? '- For research/no-build objectives, do not generate code changes or infrastructure actions. Focus on evidence gathering and concise report outputs.'
+      : '',
+    '',
+    `Workspace root: ${workspaceRoot}`,
+    `Workspace snapshot:\n${workspaceFiles.map((entry) => `- ${entry}`).join('\n')}`,
+    memoryNotes ? `\nProject memory:\n${memoryNotes}` : '',
+    globalMemoryNotes ? `\nGlobal memory:\n${globalMemoryNotes}` : '',
+    discoveryNotes ? `\nCurrent run discovery hints:\n${discoveryNotes}` : '',
+    skillNotes ? `\nSkills:\n${skillNotes}` : '',
+    teamBlock,
+    '',
+    `Root objective: ${rootObjective || task}`,
+    `Current iteration context: ${task}`,
+  ].join('\n');
+}
+
+function projectMemoryPath(workspaceRoot) {
+  return path.join(memoryDir(), `${sha256(String(workspaceRoot || '').toLowerCase())}.json`);
+}
+
+function normalizeMemory(memory) {
+  const value = ensureObject(memory);
+  return {
+    notes: Array.isArray(value.notes) ? value.notes.slice(0, 60).map((item) => String(item).trim()).filter(Boolean) : [],
+    recentObjectives: Array.isArray(value.recentObjectives)
+      ? value.recentObjectives.slice(0, 20).map((item) => String(item).trim()).filter(Boolean)
+      : [],
+    artifactPaths: Array.isArray(value.artifactPaths)
+      ? value.artifactPaths.slice(0, 160).map((item) => String(item).trim()).filter(Boolean)
+      : [],
+    updatedAt: value.updatedAt || null,
+  };
+}
+
+async function readProjectMemory(workspaceRoot) {
+  try {
+    const raw = await fs.readFile(projectMemoryPath(workspaceRoot), 'utf8');
+    return normalizeMemory(JSON.parse(raw));
+  } catch {
+    return normalizeMemory({});
+  }
+}
+
+async function writeProjectMemory(workspaceRoot, memory) {
+  const file = projectMemoryPath(workspaceRoot);
+  const payload = normalizeMemory({
+    ...memory,
+    updatedAt: new Date().toISOString(),
+  });
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  await fs.writeFile(file, JSON.stringify(payload, null, 2), 'utf8');
+  return payload;
+}
+
+function toMemoryPrompt(memory) {
+  const notes = Array.isArray(memory.notes) ? memory.notes : [];
+  const objectives = Array.isArray(memory.recentObjectives) ? memory.recentObjectives : [];
+  const artifacts = Array.isArray(memory.artifactPaths) ? memory.artifactPaths : [];
+  if (notes.length === 0 && objectives.length === 0 && artifacts.length === 0) {
+    return 'No prior memory captured for this project yet.';
+  }
+
+  const blocks = [];
+  if (objectives.length > 0) {
+    blocks.push(`Recent objectives:\n${objectives.slice(-6).map((item) => `- ${item}`).join('\n')}`);
+  }
+  if (notes.length > 0) {
+    blocks.push(`Persistent notes:\n${notes.slice(-10).map((item) => `- ${item}`).join('\n')}`);
+  }
+  if (artifacts.length > 0) {
+    blocks.push(`Known project artifacts:\n${artifacts.slice(-20).map((item) => `- ${item}`).join('\n')}`);
+  }
+  return blocks.join('\n\n');
+}
+
+function normalizeGlobalMemory(memory) {
+  const value = ensureObject(memory);
+  const projects = Array.isArray(value.projects) ? value.projects : [];
+  return {
+    userNotes: Array.isArray(value.userNotes)
+      ? value.userNotes.map((item) => String(item).trim()).filter(Boolean).slice(-80)
+      : [],
+    projects: projects.map((project) => {
+      const item = ensureObject(project);
+      return {
+        workspaceRoot: String(item.workspaceRoot || '').trim(),
+        label: String(item.label || '').trim(),
+        lastObjective: String(item.lastObjective || '').trim(),
+        lastStatus: String(item.lastStatus || '').trim(),
+        artifactPaths: Array.isArray(item.artifactPaths)
+          ? item.artifactPaths.map((entry) => String(entry).trim()).filter(Boolean).slice(-120)
+          : [],
+        updatedAt: item.updatedAt || null,
+      };
+    }).filter((item) => item.workspaceRoot).slice(-20),
+    activeWorkspaceRoot: String(value.activeWorkspaceRoot || '').trim(),
+    updatedAt: value.updatedAt || null,
+  };
+}
+
+async function readGlobalMemory() {
+  try {
+    const raw = await fs.readFile(globalMemoryPath(), 'utf8');
+    return normalizeGlobalMemory(JSON.parse(raw));
+  } catch {
+    return normalizeGlobalMemory({});
+  }
+}
+
+async function writeGlobalMemory(memory) {
+  const payload = normalizeGlobalMemory({
+    ...memory,
+    updatedAt: new Date().toISOString(),
+  });
+  const file = globalMemoryPath();
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  await fs.writeFile(file, JSON.stringify(payload, null, 2), 'utf8');
+  return payload;
+}
+
+function wordsForMatch(value) {
+  return String(value || '')
+    .toLowerCase()
+    .split(/[^a-z0-9]+/g)
+    .map((item) => item.trim())
+    .filter((item) => item.length >= 3)
+    .filter((item) => !GENERIC_OBJECTIVE_WORDS.has(item));
+}
+
+function detectObjectivePolicy(objective) {
+  const text = String(objective || '').toLowerCase();
+  const researchSignals = ['research', 'analyze', 'analysis', 'market', 'trend', 'reddit', 'news', 'findings'];
+  const noBuildSignals = [
+    "don't build",
+    'dont build',
+    'do not build',
+    'no build',
+    'research only',
+    'planning only',
+    "don't code",
+    'do not code',
+    'no coding',
+  ];
+  const webSignals = ['reddit', 'web', 'news', 'internet', 'online', 'subreddit', 'browser'];
+  const localSignals = ['workspace', 'repo', 'repository', 'codebase', 'folder', 'file', 'local'];
+  const reportSignals = ['report', 'doc', 'document', 'summary', 'findings', 'notes', 'brief'];
+
+  const researchOnly = researchSignals.some((signal) => text.includes(signal));
+  const noBuild = noBuildSignals.some((signal) => text.includes(signal));
+  const localResearchMentioned = localSignals.some((signal) => text.includes(signal));
+  const webMentioned = webSignals.some((signal) => text.includes(signal));
+  const webResearchPreferred = researchOnly && (webMentioned || !localResearchMentioned);
+  const reportRequested = reportSignals.some((signal) => text.includes(signal));
+
+  return {
+    researchOnly,
+    noBuild,
+    webResearchPreferred,
+    reportRequested,
+  };
+}
+
+function objectivePolicyPrompt(policy) {
+  const lines = [];
+  if (policy.researchOnly) {
+    lines.push('- Objective mode: research-only. Focus on findings, analysis, and documentation.');
+  }
+  if (policy.noBuild) {
+    lines.push('- Hard rule: do NOT build software, configure infrastructure, run build/test pipelines, or scaffold code.');
+  }
+  if (policy.webResearchPreferred) {
+    lines.push('- Prefer web research actions (run_playwright on relevant URLs) over local workspace exploration.');
+    lines.push('- Keep local file inspection minimal and only for writing/organizing research notes.');
+  }
+  if (policy.reportRequested) {
+    lines.push('- Deliverable expected: a concise report document with findings and clear structure.');
+  }
+  return lines.join('\n');
+}
+
+function applyExecutionModePolicy(basePolicy, executionMode) {
+  const mode = normalizeExecutionMode(executionMode);
+  const policy = ensureObject(basePolicy);
+  if (mode !== 'research') {
+    return {
+      researchOnly: Boolean(policy.researchOnly),
+      noBuild: Boolean(policy.noBuild),
+      webResearchPreferred: Boolean(policy.webResearchPreferred),
+      reportRequested: Boolean(policy.reportRequested),
+    };
+  }
+  return {
+    researchOnly: true,
+    noBuild: true,
+    webResearchPreferred: true,
+    reportRequested: true,
+  };
+}
+
+function objectiveOverlapScore(text, objectiveWords) {
+  const haystack = String(text || '').toLowerCase();
+  let score = 0;
+  for (const word of objectiveWords) {
+    if (haystack.includes(word)) {
+      score += 1;
+    }
+  }
+  return score;
+}
+
+function allowedOwnersForPolicy(policy) {
+  if (!policy || (!policy.researchOnly && !policy.noBuild)) {
+    return new Set(TEAM_OWNER_ORDER);
+  }
+  return new Set(RESEARCH_TEAM_OWNER_ORDER);
+}
+
+function fallbackOwnerForPolicy(action, policy) {
+  const allowed = allowedOwnersForPolicy(policy);
+  const intent = String(action.intent || '').toLowerCase();
+  if (allowed.has('chief') && (
+    intent.includes('orchestrate')
+    || intent.includes('delegate')
+    || intent.includes('handoff')
+    || intent.includes('prioritize')
+  )) {
+    return 'chief';
+  }
+  if (allowed.has('strategist') && (
+    intent.includes('strategy')
+    || intent.includes('tradeoff')
+    || intent.includes('synthesis')
+    || intent.includes('recommendation')
+  )) {
+    return 'strategist';
+  }
+  if (allowed.has('research')) {
+    return 'research';
+  }
+  return Array.from(allowed)[0] || 'research';
+}
+
+function actionText(action) {
+  const args = ensureObject(action.exact_args);
+  return [
+    String(action.intent || ''),
+    String(action.tool || ''),
+    String(args.command || ''),
+    Array.isArray(args.args) ? args.args.join(' ') : '',
+    String(args.path || ''),
+  ].join(' ').toLowerCase();
+}
+
+function objectiveMentionsInfra(objective) {
+  const text = String(objective || '').toLowerCase();
+  return INFRA_KEYWORDS.some((keyword) => text.includes(keyword));
+}
+
+function isOutOfScopeInfraAction(action, objective) {
+  if (objectiveMentionsInfra(objective)) {
+    return false;
+  }
+  const text = actionText(action);
+  return INFRA_KEYWORDS.some((keyword) => text.includes(keyword));
+}
+
+function isDisallowedByObjectivePolicy(action, policy) {
+  const tool = String(action.tool || '');
+  const args = ensureObject(action.exact_args);
+  const command = String(args.command || '').toLowerCase();
+  const cmdArgs = Array.isArray(args.args) ? args.args.map((item) => String(item).toLowerCase()) : [];
+  const pathArg = String(args.path || '').toLowerCase();
+
+  if (!policy.noBuild && !policy.researchOnly) {
+    return false;
+  }
+
+  if (policy.webResearchPreferred) {
+    if (tool === 'list_files' || tool === 'read_file' || tool === 'run_command') {
+      return true;
+    }
+  }
+
+  if (tool === 'run_command') {
+    if (!READ_ONLY_COMMANDS.has(command) && command !== 'open') {
+      return true;
+    }
+    if (command === 'open' && cmdArgs.some((value) => value.includes('code') || value.includes('xcode'))) {
+      return true;
+    }
+    return false;
+  }
+
+  if (tool === 'write_file' || tool === 'append_file') {
+    if (!policy.reportRequested) {
+      return true;
+    }
+    return !(
+      pathArg.endsWith('.md')
+      || pathArg.endsWith('.txt')
+      || pathArg.endsWith('.csv')
+      || pathArg.endsWith('.json')
+    );
+  }
+
+  if (tool === 'run_playwright' || tool === 'list_files' || tool === 'read_file') {
+    return false;
+  }
+
+  return true;
+}
+
+function fallbackActionForObjectivePolicy(objective, policy) {
+  const objectiveText = String(objective || '').toLowerCase();
+  if (policy.webResearchPreferred || objectiveText.includes('reddit')) {
+    const defaultResearchUrl = (
+      objectiveText.includes('reddit')
+      || objectiveText.includes('app')
+      || objectiveText.includes('idea')
+      || objectiveText.includes('startup')
+    )
+      ? 'https://www.reddit.com/'
+      : 'https://news.ycombinator.com/';
+    return normalizeAction({
+      intent: 'Browse relevant web sources for research and capture key findings.',
+      owner: 'research',
+      tool: 'run_playwright',
+      exact_args: {
+        url: defaultResearchUrl,
+        headless: true,
+      },
+      expected_diff: 'Capture page content and links as evidence for research findings.',
+      rollback_plan: 'No rollback needed. Read-only research action.',
+      risk_level: 'medium',
+    });
+  }
+  return normalizeAction({
+    intent: 'Inspect current workspace for any existing research notes relevant to the objective.',
+    owner: 'research',
+    tool: 'list_files',
+    exact_args: {
+      path: '.',
+      max_depth: 2,
+    },
+    expected_diff: 'No file changes. Inventory of relevant documents for research.',
+    rollback_plan: 'No rollback needed. Read-only action.',
+    risk_level: 'low',
+  });
+}
+
+function applyObjectivePolicyToActions(actions, objective, policy) {
+  const normalized = Array.isArray(actions) ? actions.map((action) => normalizeAction(action)) : [];
+  const allowedOwners = allowedOwnersForPolicy(policy);
+  const filtered = normalized
+    .map((action) => {
+      const next = { ...action };
+      if (!allowedOwners.has(next.owner)) {
+        next.owner = fallbackOwnerForPolicy(next, policy);
+      }
+      return next;
+    })
+    .filter((action) => {
+    if (isOutOfScopeInfraAction(action, objective)) {
+      return false;
+    }
+    return !isDisallowedByObjectivePolicy(action, policy);
+    });
+  if (filtered.length > 0) {
+    return filtered;
+  }
+  return [fallbackActionForObjectivePolicy(objective, policy)];
+}
+
+function isHomeWorkspace(candidate) {
+  try {
+    return path.resolve(String(candidate || '')) === path.resolve(DEFAULT_WORKSPACE_ROOT);
+  } catch {
+    return false;
+  }
+}
+
+function scoreProjectForObjective(project, objective) {
+  const objectiveWords = wordsForMatch(objective);
+  if (objectiveWords.length === 0) {
+    return 0;
+  }
+  const haystack = `${project.label} ${project.lastObjective} ${project.artifactPaths.join(' ')}`;
+  const score = objectiveOverlapScore(haystack, objectiveWords);
+  if (objectiveWords.length >= 2 && score < 2) {
+    return 0;
+  }
+  if (String(project.lastStatus || '').toLowerCase() === 'completed') {
+    return score + 1;
+  }
+  return score;
+}
+
+function pickWorkspaceFromGlobalMemory(globalMemory, objective) {
+  const projects = Array.isArray(globalMemory.projects) ? globalMemory.projects : [];
+  const ranked = projects
+    .map((project) => ({
+      project,
+      score: scoreProjectForObjective(project, objective),
+    }))
+    .filter((item) => item.score >= 2 && fsSync.existsSync(item.project.workspaceRoot))
+    .sort((left, right) => right.score - left.score);
+
+  if (ranked.length > 0) {
+    return ranked[0].project.workspaceRoot;
+  }
+  const active = String(globalMemory.activeWorkspaceRoot || '').trim();
+  if (active && fsSync.existsSync(active)) {
+    return active;
+  }
+  return '';
+}
+
+function buildDiscoveryTerms(objective) {
+  const words = wordsForMatch(objective);
+  const terms = new Set(words);
+  const text = String(objective || '').toLowerCase();
+  if (text.includes('snake')) {
+    terms.add('snake');
+  }
+  if (text.includes('game')) {
+    terms.add('game');
+  }
+  if (text.includes('web')) {
+    terms.add('web');
+    terms.add('html');
+  }
+  return Array.from(terms).slice(0, 10);
+}
+
+function isRelevantFileForObjective(fileNameLower, terms) {
+  const allowedExt = ['.html', '.css', '.js', '.mjs', '.ts', '.tsx', '.jsx', '.json', '.md', '.py', '.swift'];
+  const hasInterestingExt = allowedExt.some((ext) => fileNameLower.endsWith(ext));
+  if (!hasInterestingExt) {
+    return false;
+  }
+  return terms.some((term) => fileNameLower.includes(term));
+}
+
+function findNearestProjectRoot(startPath) {
+  let current = path.dirname(startPath);
+  for (let steps = 0; steps < 6; steps += 1) {
+    try {
+      const entries = new Set(fsSync.readdirSync(current));
+      if (PROJECT_MARKER_FILES.some((marker) => entries.has(marker))) {
+        return current;
+      }
+    } catch {
+      // Ignore unreadable directories.
+    }
+    const parent = path.dirname(current);
+    if (parent === current) {
+      break;
+    }
+    current = parent;
+  }
+  return path.dirname(startPath);
+}
+
+async function discoverObjectiveArtifacts({
+  objective,
+  maxResults = 30,
+  maxDirs = 1200,
+  maxDepth = 4,
+}) {
+  const terms = buildDiscoveryTerms(objective);
+  if (terms.length === 0) {
+    return { discoveredPaths: [], suggestedWorkspace: '' };
+  }
+
+  const roots = [DEFAULT_WORKSPACE_ROOT];
+  for (const sub of AUTO_SEARCH_SUBDIRS) {
+    const candidate = path.join(DEFAULT_WORKSPACE_ROOT, sub);
+    if (fsSync.existsSync(candidate) && fsSync.statSync(candidate).isDirectory()) {
+      roots.unshift(candidate);
+    }
+  }
+
+  const queue = roots.map((root) => ({ absolute: root, depth: 0 }));
+  const discovered = [];
+  let visitedDirs = 0;
+
+  while (queue.length > 0 && visitedDirs < maxDirs && discovered.length < maxResults) {
+    const current = queue.shift();
+    visitedDirs += 1;
+
+    let entries = [];
+    try {
+      entries = await fs.readdir(current.absolute, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+
+    for (const entry of entries) {
+      const nameLower = entry.name.toLowerCase();
+      const absolute = path.join(current.absolute, entry.name);
+
+      if (entry.isDirectory()) {
+        if (AUTO_IGNORED_DIRS.has(entry.name) || entry.name.startsWith('.')) {
+          continue;
+        }
+        if (terms.some((term) => nameLower.includes(term))) {
+          discovered.push(absolute);
+          if (discovered.length >= maxResults) {
+            break;
+          }
+        }
+        if (current.depth < maxDepth) {
+          queue.push({ absolute, depth: current.depth + 1 });
+        }
+        continue;
+      }
+
+      if (entry.isFile() && isRelevantFileForObjective(nameLower, terms)) {
+        discovered.push(absolute);
+        if (discovered.length >= maxResults) {
+          break;
+        }
+      }
+    }
+  }
+
+  const unique = Array.from(new Set(discovered)).slice(0, maxResults);
+  const workspace = unique.length > 0 ? findNearestProjectRoot(unique[0]) : '';
+  return {
+    discoveredPaths: unique,
+    suggestedWorkspace: workspace,
+  };
+}
+
+async function chooseWorkspaceAndHints({
+  objective,
+  requestedWorkspace,
+  globalMemory,
+}) {
+  const direct = String(requestedWorkspace || '').trim();
+  if (direct && fsSync.existsSync(direct)) {
+    let directRoot = direct;
+    try {
+      const stat = fsSync.statSync(direct);
+      if (stat.isFile()) {
+        directRoot = path.dirname(direct);
+      }
+    } catch {
+      // Keep direct value.
+    }
+    return {
+      workspaceRoot: directRoot,
+      discoveredPaths: [],
+      source: 'requested',
+    };
+  }
+
+  const memoryWorkspace = pickWorkspaceFromGlobalMemory(globalMemory, objective);
+  if (memoryWorkspace) {
+    let memoryRoot = memoryWorkspace;
+    try {
+      const stat = fsSync.statSync(memoryWorkspace);
+      if (stat.isFile()) {
+        memoryRoot = path.dirname(memoryWorkspace);
+      }
+    } catch {
+      // Keep memory value.
+    }
+    return {
+      workspaceRoot: memoryRoot,
+      discoveredPaths: collectKnownPathsForObjective(globalMemory, objective, memoryRoot),
+      source: 'memory',
+    };
+  }
+
+  const discovery = await discoverObjectiveArtifacts({ objective });
+  if (discovery.suggestedWorkspace && fsSync.existsSync(discovery.suggestedWorkspace)) {
+    return {
+      workspaceRoot: discovery.suggestedWorkspace,
+      discoveredPaths: discovery.discoveredPaths,
+      source: 'auto-discovery',
+    };
+  }
+
+  return {
+    workspaceRoot: DEFAULT_WORKSPACE_ROOT,
+    discoveredPaths: [],
+    source: 'fallback-home',
+  };
+}
+
+function collectKnownPathsForObjective(globalMemory, objective, workspaceRoot) {
+  const objectiveWords = new Set(wordsForMatch(objective));
+  const projects = Array.isArray(globalMemory.projects) ? globalMemory.projects : [];
+  const ranked = [];
+
+  for (const project of projects) {
+    const haystack = `${project.label} ${project.lastObjective} ${project.artifactPaths.join(' ')}`.toLowerCase();
+    let score = 0;
+    for (const word of objectiveWords) {
+      if (haystack.includes(word)) {
+        score += 1;
+      }
+    }
+    if (project.workspaceRoot === workspaceRoot) {
+      score += 3;
+    }
+    if (score > 0) {
+      ranked.push({ project, score });
+    }
+  }
+
+  ranked.sort((left, right) => right.score - left.score);
+  const top = ranked.slice(0, 3).map((entry) => entry.project);
+  const paths = [];
+  for (const project of top) {
+    for (const artifact of project.artifactPaths.slice(-20)) {
+      const raw = String(artifact || '').trim();
+      if (!raw) {
+        continue;
+      }
+      if (path.isAbsolute(raw)) {
+        paths.push(raw);
+      } else {
+        paths.push(path.join(project.workspaceRoot, raw));
+      }
+    }
+  }
+  return Array.from(new Set(paths)).slice(0, 20);
+}
+
+function toGlobalMemoryPrompt(globalMemory, objective, workspaceRoot) {
+  const policy = detectObjectivePolicy(objective);
+  const objectiveWords = wordsForMatch(objective);
+  const rawNotes = Array.isArray(globalMemory.userNotes) ? globalMemory.userNotes.slice(-24) : [];
+  const notes = objectiveWords.length === 0
+    ? rawNotes.slice(-6)
+    : rawNotes
+      .map((note) => ({
+        note,
+        score: objectiveOverlapScore(note, objectiveWords),
+      }))
+      .filter((item) => item.score > 0)
+      .sort((left, right) => right.score - left.score)
+      .slice(0, 10)
+      .map((item) => item.note);
+  const knownPaths = policy.webResearchPreferred
+    ? []
+    : collectKnownPathsForObjective(globalMemory, objective, workspaceRoot);
+  const lines = [];
+  if (notes.length > 0) {
+    lines.push(`User/project notes:\n${notes.map((item) => `- ${item}`).join('\n')}`);
+  }
+  if (knownPaths.length > 0) {
+    lines.push(`Known relevant artifact paths:\n${knownPaths.map((item) => `- ${item}`).join('\n')}`);
+  }
+  if (lines.length === 0) {
+    return 'No global context memory yet.';
+  }
+  return lines.join('\n\n');
+}
+
+function collectArtifactsFromResults(results) {
+  const output = [];
+  for (const result of results || []) {
+    const metadata = ensureObject(result.metadata);
+    if (typeof metadata.path === 'string' && metadata.path.trim().length > 0) {
+      output.push(metadata.path.trim());
+    }
+    if (metadata.kind === 'playwright') {
+      const outputText = String(result.output || '');
+      const match = outputText.match(/"screenshotPath"\s*:\s*"([^"]+)"/);
+      if (match && match[1]) {
+        output.push(match[1]);
+      }
+    }
+  }
+  return Array.from(new Set(output)).slice(0, 120);
+}
+
+function collectWrittenArtifactsFromRun(runState) {
+  const results = Array.isArray(runState?.results) ? runState.results : [];
+  const workspaceRoot = String(runState?.workspaceRoot || '').trim();
+  const paths = [];
+  for (const result of results) {
+    if (!result || result.ok !== true) {
+      continue;
+    }
+    const tool = String(result.tool || '');
+    if (tool !== 'write_file' && tool !== 'append_file') {
+      continue;
+    }
+    const metadata = ensureObject(result.metadata);
+    const raw = String(metadata.path || '').trim();
+    if (!raw) {
+      continue;
+    }
+    const absolute = path.isAbsolute(raw)
+      ? path.resolve(raw)
+      : (workspaceRoot ? path.resolve(workspaceRoot, raw) : raw);
+    paths.push(absolute);
+  }
+  return Array.from(new Set(paths)).slice(0, 200);
+}
+
+function inferProjectLabel(workspaceRoot, objective) {
+  const workspaceName = path.basename(workspaceRoot);
+  const objectiveWords = wordsForMatch(objective).slice(0, 4);
+  if (objectiveWords.length === 0) {
+    return workspaceName || 'project';
+  }
+  return `${workspaceName}: ${objectiveWords.join(' ')}`;
+}
+
+async function findSkillMarkdownFiles(rootDir, depth = 0, maxDepth = 3) {
+  if (depth > maxDepth) {
+    return [];
+  }
+
+  let entries = [];
+  try {
+    entries = await fs.readdir(rootDir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+
+  const output = [];
+  for (const entry of entries) {
+    const absolute = path.join(rootDir, entry.name);
+    if (entry.isDirectory()) {
+      const nested = await findSkillMarkdownFiles(absolute, depth + 1, maxDepth);
+      output.push(...nested);
+      continue;
+    }
+
+    const lower = entry.name.toLowerCase();
+    if (lower === 'skill.md' || lower.endsWith('.skill.md') || lower.endsWith('.md')) {
+      output.push(absolute);
+    }
+  }
+  return output;
+}
+
+async function loadProjectSkills(workspaceRoot, limit = 10) {
+  const roots = [
+    path.join(workspaceRoot, '.claude', 'skills'),
+    path.join(workspaceRoot, '.geepus', 'skills'),
+    path.join(workspaceRoot, 'skills'),
+  ];
+  const files = [];
+  for (const root of roots) {
+    const matches = await findSkillMarkdownFiles(root, 0, 3);
+    files.push(...matches);
+  }
+
+  const unique = Array.from(new Set(files)).slice(0, limit);
+  const skills = [];
+  for (const file of unique) {
+    try {
+      const content = await fs.readFile(file, 'utf8');
+      const preview = content.split('\n').slice(0, 16).join('\n').trim();
+      skills.push({
+        name: path.basename(path.dirname(file)),
+        path: path.relative(workspaceRoot, file),
+        preview: truncate(preview, 800),
+      });
+    } catch {
+      // Ignore unreadable skill files.
+    }
+  }
+
+  return skills;
+}
+
+async function loadProjectAgents(workspaceRoot, limit = 8) {
+  const roots = [
+    path.join(workspaceRoot, '.claude', 'agents'),
+    path.join(workspaceRoot, '.geepus', 'agents'),
+  ];
+  const files = [];
+  for (const root of roots) {
+    const matches = await findSkillMarkdownFiles(root, 0, 3);
+    files.push(...matches);
+  }
+
+  const unique = Array.from(new Set(files)).slice(0, limit);
+  const agents = [];
+  for (const file of unique) {
+    try {
+      const content = await fs.readFile(file, 'utf8');
+      const preview = content.split('\n').slice(0, 16).join('\n').trim();
+      agents.push({
+        name: path.basename(file, path.extname(file)),
+        path: path.relative(workspaceRoot, file),
+        prompt: truncate(preview, 800),
+      });
+    } catch {
+      // Ignore unreadable agent files.
+    }
+  }
+  return agents;
+}
+
+function toSkillPrompt(skills) {
+  if (!Array.isArray(skills) || skills.length === 0) {
+    return 'No skill files found in .claude/skills or project skills folders.';
+  }
+  return skills
+    .map((skill) => `Skill: ${skill.name}\nPath: ${skill.path}\nNotes:\n${skill.preview}`)
+    .join('\n\n');
+}
+
+const TEAM_PROMPTS = [
+  {
+    role: 'chief',
+    label: 'Chief of Staff',
+    instructions: 'Decide which specialist roles are needed now, orchestrate handoffs, and ensure momentum.',
+  },
+  {
+    role: 'strategist',
+    label: 'Strategist',
+    instructions: 'Define strategy, sequencing, tradeoffs, and the most leverageable path to success.',
+  },
+  {
+    role: 'research',
+    label: 'Research Lead',
+    instructions: 'Gather and synthesize relevant technical/product context, constraints, and options.',
+  },
+  {
+    role: 'product',
+    label: 'Product Lead',
+    instructions: 'Define milestone order, acceptance criteria, and the minimum lovable version.',
+  },
+  {
+    role: 'design',
+    label: 'Design Lead',
+    instructions: 'Define UX flow, copy tone, and visual constraints for first-time users.',
+  },
+  {
+    role: 'engineering',
+    label: 'Engineering Lead',
+    instructions: 'Define implementation architecture and risk-managed execution steps.',
+  },
+  {
+    role: 'qa',
+    label: 'QA Lead',
+    instructions: 'Define tests, validation gates, regression checks, and release readiness criteria.',
+  },
+];
+
+function ownerFromRoleToken(value) {
+  const token = String(value || '').toLowerCase();
+  if (token.includes('chief')) return 'chief';
+  if (token.includes('strateg')) return 'strategist';
+  if (token.includes('research')) return 'research';
+  if (token.includes('product')) return 'product';
+  if (token.includes('design')) return 'design';
+  if (token.includes('qa') || token.includes('quality')) return 'qa';
+  if (token.includes('engineer') || token.includes('developer') || token.includes('dev')) return 'engineering';
+  return 'engineering';
+}
+
+function roleAllowedByObjectivePolicy(owner, policy) {
+  if (!policy || (!policy.researchOnly && !policy.noBuild)) {
+    return true;
+  }
+  return new Set(RESEARCH_TEAM_OWNER_ORDER).has(owner);
+}
+
+function applyObjectivePolicyToRoles(rolePrompts, policy) {
+  if (!Array.isArray(rolePrompts) || rolePrompts.length === 0) {
+    return [];
+  }
+  const filtered = rolePrompts.filter((role) => {
+    const owner = ownerFromRoleToken(role.role || role.label || role.instructions);
+    return roleAllowedByObjectivePolicy(owner, policy);
+  });
+  return filtered.length > 0 ? filtered : rolePrompts;
+}
+
+async function collectTeamBrief({
+  settings,
+  model,
+  task,
+  rootObjective = '',
+  workspaceRoot,
+  workspaceFiles,
+  memoryNotes,
+  skillNotes,
+  agentProfiles = [],
+  objectivePolicy = null,
+  callGuards = null,
+  onProgress = null,
+}) {
+  const briefs = [];
+  let currentModel = model;
+  const policy = objectivePolicy || detectObjectivePolicy(rootObjective || task);
+  const policyNotes = objectivePolicyPrompt(policy);
+  const strictResearchTeam = policy.researchOnly || policy.noBuild;
+  const sourceRoles = strictResearchTeam
+    ? TEAM_PROMPTS
+    : (Array.isArray(agentProfiles) && agentProfiles.length > 0
+    ? agentProfiles.map((agent) => ({
+      role: String(agent.name || 'agent').toLowerCase(),
+      label: String(agent.name || 'Custom Agent'),
+      instructions: String(agent.prompt || '').trim() || 'Execute your specialist perspective.',
+    }))
+    : TEAM_PROMPTS);
+  const rolePrompts = applyObjectivePolicyToRoles(sourceRoles, policy);
+
+  for (let index = 0; index < rolePrompts.length; index += 1) {
+    const role = rolePrompts[index];
+    const owner = ownerFromRoleToken(role.role || role.label);
+    if (typeof onProgress === 'function') {
+      onProgress({
+        type: 'team_brief_started',
+        owner,
+        summary: `${role.label} is preparing guidance (${index + 1}/${rolePrompts.length}).`,
+      });
+    }
+
+    const prompt = [
+      `You are ${role.label} in a Claude-style agent team.`,
+      'Return concise plain text only.',
+      'Give 4-8 bullets with concrete, implementation-ready guidance.',
+      strictResearchTeam
+        ? 'This is a research run. Do not propose coding, infrastructure, setup, or implementation tasks.'
+        : '',
+      (strictResearchTeam && owner === 'chief')
+        ? 'Chief rule: delegate only to Strategist and Research Lead.'
+        : '',
+      '',
+      `Role directive: ${role.instructions}`,
+      `Objective: ${rootObjective || task}`,
+      `Iteration context: ${task}`,
+      policyNotes ? `Objective policy:\n${policyNotes}` : '',
+      `Workspace root: ${workspaceRoot}`,
+      `Workspace snapshot:\n${workspaceFiles.slice(0, 120).map((entry) => `- ${entry}`).join('\n')}`,
+      `Project memory:\n${memoryNotes}`,
+      `Skills:\n${skillNotes}`,
+    ].join('\n');
+
+    try {
+      const response = await callResponsesWithFallback({
+        settings,
+        model: currentModel,
+        callGuards,
+        input: [
+          {
+            role: 'system',
+            content: `You are ${role.label}. Stay practical and deterministic.`,
+          },
+          {
+            role: 'user',
+            content: prompt,
+          },
+        ],
+        temperature: 0.2,
+      });
+
+      currentModel = response.model || currentModel;
+      const brief = {
+        role: role.role,
+        label: role.label,
+        content: truncate(extractOutputText(settings.provider, response.payload), 1400),
+      };
+      briefs.push(brief);
+
+      if (typeof onProgress === 'function') {
+        onProgress({
+          type: 'team_brief',
+          owner,
+          summary: truncate(brief.content || `${role.label} brief ready.`, 220),
+        });
+      }
+    } catch (error) {
+      if (typeof onProgress === 'function') {
+        onProgress({
+          type: 'team_brief_failed',
+          owner,
+          summary: `${role.label} failed: ${truncate(String(error?.message || error || 'unknown error'), 180)}`,
+        });
+      }
+      throw error;
+    }
+  }
+
+  const summary = briefs.map((item) => `${item.label}:\n${item.content}`).join('\n\n');
+  return {
+    model: currentModel,
+    briefs,
+    summary,
+  };
+}
+
+function hasVerificationAction(actions) {
+  return actions.some((action) => {
+    if (action.tool !== 'run_command') {
+      return false;
+    }
+    const args = Array.isArray(action.exact_args?.args) ? action.exact_args.args.map((item) => String(item).toLowerCase()) : [];
+    const joined = args.join(' ');
+    const intent = String(action.intent || '').toLowerCase();
+    return joined.includes('test') || joined.includes('lint') || joined.includes('build') || intent.includes('test') || intent.includes('lint');
+  });
+}
+
+function hasWriteAction(actions) {
+  return actions.some((action) => action.tool === 'write_file' || action.tool === 'append_file');
+}
+
+function recommendQualityCommands(workspaceFiles) {
+  const files = new Set((workspaceFiles || []).map((item) => String(item).replace(/\/$/, '')));
+  const commands = [];
+  if (files.has('package.json')) {
+    commands.push({
+      command: 'npm',
+      args: ['test'],
+      cwd: '.',
+      timeout_ms: 240000,
+      intent: 'Run automated tests',
+      expected_diff: 'No file change. Test output validates implementation.',
+    });
+    commands.push({
+      command: 'npm',
+      args: ['run', 'lint'],
+      cwd: '.',
+      timeout_ms: 240000,
+      intent: 'Run linter checks',
+      expected_diff: 'No file change. Lint output confirms code quality.',
+    });
+  }
+  if (files.has('Package.swift')) {
+    commands.push({
+      command: 'swift',
+      args: ['test'],
+      cwd: '.',
+      timeout_ms: 240000,
+      intent: 'Run Swift tests',
+      expected_diff: 'No file change. Swift test output validates behavior.',
+    });
+  }
+  if (files.has('pyproject.toml') || files.has('requirements.txt')) {
+    commands.push({
+      command: 'python3',
+      args: ['-m', 'pytest'],
+      cwd: '.',
+      timeout_ms: 240000,
+      intent: 'Run Python tests',
+      expected_diff: 'No file change. Pytest output validates behavior.',
+    });
+  }
+  return commands;
+}
+
+function injectQualityActionIfNeeded(actions, workspaceFiles, teamMode, objectivePolicy = null) {
+  if (objectivePolicy && (objectivePolicy.researchOnly || objectivePolicy.noBuild)) {
+    return actions;
+  }
+  if (teamMode !== 'teams') {
+    return actions;
+  }
+  if (!hasWriteAction(actions) || hasVerificationAction(actions)) {
+    return actions;
+  }
+
+  const candidates = recommendQualityCommands(workspaceFiles);
+  if (candidates.length === 0) {
+    return actions;
+  }
+
+  const chosen = candidates[0];
+  const qaAction = normalizeAction({
+    intent: chosen.intent,
+    tool: 'run_command',
+    exact_args: {
+      command: chosen.command,
+      args: chosen.args,
+      cwd: chosen.cwd,
+      timeout_ms: chosen.timeout_ms,
+    },
+    expected_diff: chosen.expected_diff,
+    rollback_plan: 'No rollback needed. This is a verification step.',
+    risk_level: 'low',
+  });
+
+  return [...actions, qaAction];
+}
+
+async function createAgentPlan({
+  settings,
+  model,
+  task,
+  rootObjective = '',
+  workspaceRoot,
+  teamMode = 'teams',
+  historySummary = '',
+  discoveryHints = [],
+  runId = '',
+  iteration = 0,
+  objectiveForWatch = '',
+  objectivePolicy = null,
+  callGuards = null,
+  onTeamEvent = null,
+}) {
+  const effectiveObjective = rootObjective || objectiveForWatch || task;
+  const policy = objectivePolicy || detectObjectivePolicy(effectiveObjective);
+  const files = policy.webResearchPreferred
+    ? ['(web research mode: local workspace scan minimized)']
+    : await listWorkspaceFiles(workspaceRoot, 2, 180);
+  const memory = await readProjectMemory(workspaceRoot);
+  const globalMemory = await readGlobalMemory();
+  const skills = await loadProjectSkills(workspaceRoot, 12);
+  const agents = await loadProjectAgents(workspaceRoot, 8);
+  const memoryNotes = toMemoryPrompt(memory);
+  const globalMemoryNotes = toGlobalMemoryPrompt(globalMemory, effectiveObjective, workspaceRoot);
+  const discoveryNotes = Array.isArray(discoveryHints) && discoveryHints.length > 0
+    ? discoveryHints.map((item) => `- ${item}`).join('\n')
+    : '';
+  const skillNotes = toSkillPrompt(skills);
+
+  let teamBrief = '';
+  let teamBriefs = [];
+  if (teamMode === 'teams') {
+    if (runId) {
+      broadcastWatchEvent(runId, {
+        type: 'planning_started',
+        iteration,
+        summary: 'Team planning in progress.',
+      }, {
+        objective: objectiveForWatch || task,
+        provider: settings.provider,
+        model,
+        workspaceRoot,
+        teamMode,
+      });
+    }
+    const roleBriefs = await collectTeamBrief({
+      settings,
+      model,
+      task,
+      rootObjective: effectiveObjective,
+      workspaceRoot,
+      workspaceFiles: files,
+      memoryNotes,
+      skillNotes,
+      agentProfiles: agents,
+      objectivePolicy: policy,
+      callGuards,
+      onProgress: onTeamEvent,
+    });
+    model = roleBriefs.model || model;
+    teamBrief = roleBriefs.summary;
+    teamBriefs = roleBriefs.briefs;
+  }
+
+  const plannerPrompt = buildAgentPlannerPrompt({
+    task,
+    rootObjective: effectiveObjective,
+    workspaceRoot,
+    workspaceFiles: files,
+    memoryNotes,
+    globalMemoryNotes,
+    discoveryNotes,
+    skillNotes,
+    teamBrief,
+    teamMode,
+    objectivePolicy: policy,
+  });
+  const guidance = [
+    'Return JSON only.',
+    'No markdown.',
+    'No explanations.',
+    'No refusal language.',
+    historySummary ? `Use this latest history for continuity:\n${historySummary}` : '',
+  ].join(' ');
+
+  let lastOutput = '';
+  let lastError = '';
+
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    const result = await callResponsesWithFallback({
+      settings,
+      model,
+      callGuards,
+      input: [
+        {
+          role: 'system',
+          content: 'You output strict JSON execution plans for a safe local coding agent.',
+        },
+        {
+          role: 'user',
+          content: `${plannerPrompt}\n\n${guidance}`,
+        },
+        ...(attempt > 1
+          ? [
+            {
+              role: 'user',
+              content: `Attempt ${attempt}: previous output was invalid. Return ONLY a JSON object that matches the schema and includes actions.`,
+            },
+          ]
+          : []),
+      ],
+      temperature: 0.05,
+    });
+
+    const outputText = extractOutputText(settings.provider, result.payload);
+    model = result.model || model;
+    lastOutput = outputText;
+
+    if (isLikelyRefusal(outputText)) {
+      lastError = 'Model returned refusal text instead of actions.';
+      continue;
+    }
+
+    const jsonText = extractFirstJSONObject(outputText);
+    if (!jsonText) {
+      lastError = 'Model did not return JSON.';
+      continue;
+    }
+
+    let parsed;
+    try {
+      parsed = JSON.parse(jsonText);
+    } catch (error) {
+      lastError = `Failed to parse plan JSON: ${error.message}`;
+      continue;
+    }
+
+    const plan = normalizePlan(parsed);
+    const policyScopedActions = applyObjectivePolicyToActions(plan.actions, effectiveObjective, policy);
+    const actions = injectQualityActionIfNeeded(policyScopedActions, files, teamMode, policy).map((action) => {
+      const actionPolicy = evaluateActionPolicy(action);
+      return {
+        ...action,
+        policy_allowed: actionPolicy.allowed,
+        policy_reason: actionPolicy.reason,
+        effective_risk: actionPolicy.effectiveRisk,
+      };
+    });
+
+    await appendAuditEvent({
+      type: 'agent_plan_created',
+      model: result.model,
+      workspace_root: workspaceRoot,
+      task_summary: truncate(task, 400),
+      action_count: actions.length,
+      team_mode: teamMode,
+      skills_loaded: skills.length,
+      custom_agents_loaded: agents.length,
+      team_roles: teamBriefs.length || TEAM_PROMPTS.length,
+    });
+
+    if (runId) {
+      broadcastWatchEvent(runId, {
+        type: 'planning_completed',
+        iteration,
+        summary: `${actions.length} planned actions.`,
+      }, {
+        objective: objectiveForWatch || task,
+        provider: settings.provider,
+        model: result.model,
+        workspaceRoot,
+        teamMode,
+      });
+    }
+
+    return {
+      model: result.model,
+      summary: plan.summary,
+      actions,
+      teamMode,
+      skillsLoaded: skills.length,
+      customAgentsLoaded: agents.length,
+      teamBriefs,
+    };
+  }
+
+  await appendAuditEvent({
+    type: 'agent_plan_failed',
+    model,
+    workspace_root: workspaceRoot,
+    task_summary: truncate(task, 400),
+    reason: truncate(lastError || 'Unknown planner failure', 500),
+  });
+
+  throw new Error(
+    `Planner failed to generate executable actions. ${lastError}\n\nLast model output:\n${truncate(lastOutput, 1200)}`,
+  );
+}
+
+async function summarizeExecution({
+  settings,
+  model,
+  task,
+  workspaceRoot,
+  plan,
+  results,
+  finalState = 'stopped',
+  callGuards = null,
+}) {
+  const failed = (results || []).filter((item) => item.ok === false);
+  const writtenFiles = collectWrittenFilePaths(results);
+  const writtenFilesBlock = writtenFiles.length > 0
+    ? `Verified files created/updated:\n${writtenFiles.map((item) => `- ${item}`).join('\n')}`
+    : 'Verified files created/updated: none';
+  if (failed.length > 0 && finalState !== 'completed') {
+    const first = failed[0];
+    return {
+      model,
+      report: [
+        'Task status: incomplete.',
+        `Objective: ${task}`,
+        `Workspace: ${workspaceRoot}`,
+        `Failure point: ${first.tool} - ${first.intent}`,
+        `Error: ${truncate(first.output || first.summary || 'Unknown error', 1200)}`,
+        'Geepus should continue in another iteration to resolve this failure before declaring completion.',
+        writtenFilesBlock,
+      ].join('\n'),
+    };
+  }
+
+  if (failed.length > 0 && finalState === 'completed') {
+    return {
+      model,
+      report: [
+        'Task status: completed.',
+        `Objective: ${task}`,
+        `Workspace: ${workspaceRoot}`,
+        `Recovered from ${failed.length} earlier issue(s) during execution.`,
+        'Final outcome: completed with successful final iteration.',
+        writtenFilesBlock,
+      ].join('\n'),
+    };
+  }
+
+  const executionSummary = [
+    `Task: ${task}`,
+    `Workspace: ${workspaceRoot}`,
+    `Plan summary: ${plan.summary}`,
+    writtenFilesBlock,
+    'Action results:',
+    ...results.map((result, index) => {
+      return `${index + 1}. ${result.intent} | ${result.tool} | ${result.ok ? 'ok' : 'failed'}\n${truncate(result.output || '', 800)}`;
+    }),
+  ].join('\n\n');
+
+  try {
+    const response = await callResponsesWithFallback({
+      settings,
+      model,
+      callGuards,
+      input: [
+        {
+          role: 'system',
+          content: [
+            'Summarize agent execution for a non-technical user.',
+            'Include what was changed and next steps.',
+            'Never invent file names or paths.',
+            'If mentioning saved files, only use paths explicitly listed in "Verified files created/updated".',
+          ].join(' '),
+        },
+        {
+          role: 'user',
+          content: executionSummary,
+        },
+      ],
+      temperature: 0.2,
+    });
+    return {
+      model: response.model,
+      report: extractOutputText(settings.provider, response.payload),
+    };
+  } catch {
+    return {
+      model,
+      report: executionSummary,
+    };
+  }
+}
+
+async function resolveAgentModel(settings, requestedModel) {
+  const discoveredModels = await listModels(settings.provider, settings.apiKey, settings.baseUrl);
+  if (discoveredModels.length === 0) {
+    throw new Error('No models available for this key.');
+  }
+
+  const preferred = typeof requestedModel === 'string' && requestedModel.trim().length > 0
+    ? requestedModel.trim()
+    : settings.model;
+  const picked = pickBestModel(discoveredModels, preferred);
+  return {
+    model: picked,
+    models: discoveredModels,
+  };
+}
+
+function clampNumber(value, min, max, fallback) {
+  if (!Number.isFinite(value)) {
+    return fallback;
+  }
+  return Math.max(min, Math.min(max, Math.floor(value)));
+}
+
+function summarizeRunHistory(iterations, maxEntries = 4) {
+  if (!Array.isArray(iterations) || iterations.length === 0) {
+    return 'No previous iterations.';
+  }
+
+  const slice = iterations.slice(-maxEntries);
+  return slice.map((iteration) => {
+    const actionSummary = iteration.results
+      .slice(0, 6)
+      .map((result) => `${result.ok ? 'ok' : 'failed'}:${result.tool}:${result.intent}`)
+      .join(' | ');
+    return `Iteration ${iteration.iteration}: ${iteration.summary}\n${actionSummary}`;
+  }).join('\n\n');
+}
+
+function pickPersistentNotesFromResults(results, limit = 8) {
+  const lines = [];
+  for (const result of results || []) {
+    const summary = String(result.summary || '').trim();
+    if (summary) {
+      lines.push(summary);
+    }
+    if (lines.length >= limit) {
+      break;
+    }
+  }
+  return lines;
+}
+
+function collectWrittenFilePaths(results) {
+  const paths = [];
+  for (const result of results || []) {
+    if (!result || result.ok !== true) {
+      continue;
+    }
+    const tool = String(result.tool || '');
+    if (tool !== 'write_file' && tool !== 'append_file') {
+      continue;
+    }
+    const metadata = ensureObject(result.metadata);
+    const filePath = String(metadata.path || '').trim();
+    if (filePath) {
+      paths.push(filePath);
+    }
+  }
+  return Array.from(new Set(paths)).slice(0, 40);
+}
+
+function hasSuccessfulReviewEvidence(results) {
+  return (results || []).some((result) => {
+    if (!result || result.ok !== true) {
+      return false;
+    }
+    if (result.tool === 'run_playwright') {
+      return true;
+    }
+    if (result.tool !== 'run_command') {
+      return false;
+    }
+    const summary = String(result.summary || '').toLowerCase();
+    const output = String(result.output || '').toLowerCase();
+    const checks = [' test', ' lint', ' build', 'pytest', 'playwright'];
+    return checks.some((token) => summary.includes(token) || output.includes(token));
+  });
+}
+
+function objectiveNeedsPlaywright(objective) {
+  const lower = String(objective || '').toLowerCase();
+  const signals = ['web game', 'browser game', 'snake game', 'webapp', 'website', 'frontend'];
+  return signals.some((token) => lower.includes(token));
+}
+
+function isIterationDrifted(iterationResults, objective, policy) {
+  const results = Array.isArray(iterationResults) ? iterationResults : [];
+  if (results.length === 0) {
+    return true;
+  }
+
+  const text = results
+    .map((result) => `${result.intent || ''} ${result.summary || ''} ${result.output || ''}`)
+    .join(' ')
+    .toLowerCase();
+
+  if (!objectiveMentionsInfra(objective) && INFRA_KEYWORDS.some((token) => text.includes(token))) {
+    return true;
+  }
+
+  if (policy && (policy.researchOnly || policy.noBuild)) {
+    for (const result of results) {
+      if (String(result.tool || '') === 'run_command') {
+        return true;
+      }
+      if (String(result.tool || '') === 'write_file' || String(result.tool || '') === 'append_file') {
+        const pathValue = String(result?.metadata?.path || '').toLowerCase();
+        if (
+          pathValue
+          && !pathValue.endsWith('.md')
+          && !pathValue.endsWith('.txt')
+          && !pathValue.endsWith('.csv')
+          && !pathValue.endsWith('.json')
+        ) {
+          return true;
+        }
+      }
+    }
+  }
+
+  const objectiveWords = wordsForMatch(objective);
+  if (objectiveWords.length === 0) {
+    return false;
+  }
+  const overlap = objectiveOverlapScore(text, objectiveWords);
+  return overlap === 0;
+}
+
+async function evaluateObjectiveProgress({
+  settings,
+  model,
+  objective,
+  workspaceRoot,
+  iterationSummary,
+  remainingIterations,
+  callGuards = null,
+}) {
+  const prompt = [
+    'You are a completion judge for a local coding agent run.',
+    'Return JSON only with schema:',
+    '{"done":true|false,"reason":"string","next_focus":"string"}',
+    'Set done=true only if objective is substantially completed and verified.',
+    'If not done, provide next_focus as one concrete next milestone.',
+    '',
+    `Objective: ${objective}`,
+    `Workspace: ${workspaceRoot}`,
+    `Remaining iterations budget: ${remainingIterations}`,
+    '',
+    `Latest execution summary:\n${iterationSummary}`,
+  ].join('\n');
+
+  try {
+    const response = await callResponsesWithFallback({
+      settings,
+      model,
+      callGuards,
+      input: [
+        {
+          role: 'system',
+          content: 'You are a strict JSON completion classifier.',
+        },
+        {
+          role: 'user',
+          content: prompt,
+        },
+      ],
+      temperature: 0.1,
+    });
+
+    const output = extractOutputText(settings.provider, response.payload);
+    const jsonText = extractFirstJSONObject(output);
+    if (!jsonText) {
+      return {
+        model: response.model,
+        done: false,
+        reason: 'No completion JSON returned.',
+        next_focus: 'Continue implementation and validation based on uncovered gaps.',
+      };
+    }
+
+    const parsed = ensureObject(JSON.parse(jsonText));
+    return {
+      model: response.model,
+      done: parsed.done === true,
+      reason: String(parsed.reason || '').trim() || 'No reason provided.',
+      next_focus: String(parsed.next_focus || '').trim() || 'Continue implementation and validation.',
+    };
+  } catch {
+    return {
+      model,
+      done: false,
+      reason: 'Completion check failed.',
+      next_focus: 'Continue implementation and validation.',
+    };
+  }
+}
+
+async function executePlannedActions({
+  settings,
+  model,
+  task,
+  workspaceRoot,
+  planSummary,
+  actions,
+  allowRisky,
+  maxActions,
+  callGuards = null,
+  runMeta = {},
+}) {
+  const normalizedPlan = {
+    summary: String(planSummary || 'Agent plan'),
+    actions: Array.isArray(actions) ? actions.map((action) => normalizeAction(action)) : [],
+  };
+
+  if (normalizedPlan.actions.length === 0) {
+    throw new Error('Plan is missing actions.');
+  }
+
+  const cappedActions = normalizedPlan.actions.slice(0, Math.max(1, maxActions));
+  const actionsWithPolicy = cappedActions.map((action) => {
+    const policy = evaluateActionPolicy(action);
+    return { action, policy };
+  });
+
+  const denied = actionsWithPolicy.filter((entry) => !entry.policy.allowed);
+  if (denied.length > 0) {
+    await appendAuditEvent({
+      type: 'agent_execution_blocked',
+      model,
+      workspace_root: workspaceRoot,
+      reason: denied[0].policy.reason,
+      task_summary: truncate(task, 400),
+      ...runMeta,
+    });
+    throw new Error(`Blocked by policy: ${denied[0].policy.reason}`);
+  }
+
+  const requiresApproval = actionsWithPolicy.filter((entry) => entry.policy.effectiveRisk !== 'low');
+  if (requiresApproval.length > 0 && !allowRisky) {
+    await appendAuditEvent({
+      type: 'agent_execution_needs_approval',
+      model,
+      workspace_root: workspaceRoot,
+      action_count: requiresApproval.length,
+      task_summary: truncate(task, 400),
+      ...runMeta,
+    });
+    return {
+      requiresApproval: true,
+      summary: normalizedPlan.summary,
+      model,
+      blockedActions: requiresApproval.map((entry, index) => ({
+        index: index + 1,
+        intent: entry.action.intent,
+        tool: entry.action.tool,
+        effective_risk: entry.policy.effectiveRisk,
+        reason: entry.policy.reason,
+      })),
+    };
+  }
+
+  const results = [];
+  let stoppedByUser = false;
+  for (let index = 0; index < actionsWithPolicy.length; index += 1) {
+    throwIfRunStopped(runMeta.run_id || '');
+    const entry = actionsWithPolicy[index];
+    const owner = normalizeOwner(entry.action.owner) || inferOwnerFromAction(entry.action);
+    if (runMeta.run_id) {
+      broadcastWatchEvent(runMeta.run_id, {
+        type: 'action_started',
+        iteration: runMeta.iteration || 0,
+        actionIndex: index + 1,
+        owner,
+        tool: entry.action.tool,
+        intent: entry.action.intent,
+      }, {
+        state: 'running',
+        model,
+        workspaceRoot,
+      });
+    }
+    try {
+      if (callGuards && typeof callGuards.beforeToolCall === 'function') {
+        callGuards.beforeToolCall(entry.action);
+      }
+      const outcome = await executeAction(entry.action, workspaceRoot, runMeta.run_id || '');
+      await appendAuditEvent({
+        type: 'agent_action_executed',
+        model,
+        workspace_root: workspaceRoot,
+        action_index: index + 1,
+        owner,
+        tool: entry.action.tool,
+        intent: truncate(entry.action.intent, 240),
+        risk: entry.policy.effectiveRisk,
+        ok: outcome.ok,
+        ...runMeta,
+      });
+      results.push({
+        index: index + 1,
+        owner,
+        intent: entry.action.intent,
+        tool: entry.action.tool,
+        expected_diff: entry.action.expected_diff,
+        rollback_plan: entry.action.rollback_plan,
+        risk_level: entry.policy.effectiveRisk,
+        ok: outcome.ok,
+        summary: outcome.summary,
+        output: truncate(outcome.output || '', 5000),
+        metadata: ensureObject(outcome.metadata),
+      });
+
+      if (runMeta.run_id) {
+        broadcastWatchEvent(runMeta.run_id, {
+          type: 'action_finished',
+          iteration: runMeta.iteration || 0,
+          actionIndex: index + 1,
+          owner,
+          tool: entry.action.tool,
+          intent: entry.action.intent,
+          ok: outcome.ok,
+          summary: outcome.summary,
+        }, {
+          state: outcome.ok ? 'running' : 'stopped',
+          model,
+          workspaceRoot,
+        });
+      }
+
+      if (!outcome.ok) {
+        break;
+      }
+    } catch (error) {
+      if (error instanceof BudgetLimitError) {
+        throw error;
+      }
+      if (error instanceof StopRequestedError) {
+        stoppedByUser = true;
+        results.push({
+          index: index + 1,
+          owner,
+          intent: entry.action.intent,
+          tool: entry.action.tool,
+          expected_diff: entry.action.expected_diff,
+          rollback_plan: entry.action.rollback_plan,
+          risk_level: entry.policy.effectiveRisk,
+          ok: false,
+          summary: 'Stopped by user',
+          output: String(error.message || error),
+          metadata: {},
+        });
+        if (runMeta.run_id) {
+          broadcastWatchEvent(runMeta.run_id, {
+            type: 'run_stop_requested',
+            iteration: runMeta.iteration || 0,
+            owner: 'chief',
+            summary: String(error.message || 'Stop requested by user.'),
+          }, {
+            state: 'stopped',
+            model,
+            workspaceRoot,
+          });
+        }
+        break;
+      }
+      await appendAuditEvent({
+        type: 'agent_action_failed',
+        model,
+        workspace_root: workspaceRoot,
+        action_index: index + 1,
+        owner,
+        tool: entry.action.tool,
+        intent: truncate(entry.action.intent, 240),
+        risk: entry.policy.effectiveRisk,
+        ok: false,
+        error: truncate(error.message || String(error), 500),
+        ...runMeta,
+      });
+      results.push({
+        index: index + 1,
+        owner,
+        intent: entry.action.intent,
+        tool: entry.action.tool,
+        expected_diff: entry.action.expected_diff,
+        rollback_plan: entry.action.rollback_plan,
+        risk_level: entry.policy.effectiveRisk,
+        ok: false,
+        summary: 'Execution failed',
+        output: String(error.message || error),
+        metadata: {},
+      });
+
+      if (runMeta.run_id) {
+        broadcastWatchEvent(runMeta.run_id, {
+          type: 'action_finished',
+          iteration: runMeta.iteration || 0,
+          actionIndex: index + 1,
+          owner,
+          tool: entry.action.tool,
+          intent: entry.action.intent,
+          ok: false,
+          summary: String(error.message || error),
+        }, {
+          state: 'stopped',
+          model,
+          workspaceRoot,
+        });
+      }
+      break;
+    }
+  }
+
+  const finalState = results.every((entry) => entry.ok) ? 'completed' : 'stopped';
+  return {
+    requiresApproval: false,
+    state: finalState,
+    stoppedByUser,
+    stopReason: stoppedByUser ? (getRunStopReason(runMeta.run_id || '') || 'Stopped by user request.') : '',
+    summary: normalizedPlan.summary,
+    model,
+    results,
+  };
+}
+
+async function runObjectiveCore(settings, request) {
+  if (!settings.apiKey) {
+    throw new Error('Add your API key first.');
+  }
+
+  const resumeRunId = typeof request?.resumeRunId === 'string' ? request.resumeRunId.trim() : '';
+  const requestedExecutionMode = normalizeExecutionMode(request?.executionMode || 'action');
+  const allowRisky = request?.allowRisky === true;
+  const selectedTeamMode = request?.teamMode === 'solo' ? 'solo' : (settings.teamMode === 'solo' ? 'solo' : 'teams');
+  const requestThreadContext = typeof request?.threadContext === 'string' ? request.threadContext.trim() : '';
+  const sessionStartedAt = Date.now();
+
+  if (!resumeRunId && activeRunIds.size > 0) {
+    const existingRunId = Array.from(activeRunIds)[0] || '';
+    throw new Error(
+      `A task is already running (${existingRunId}). Click Stop, then start a new task.`,
+    );
+  }
+
+  let runState;
+  if (resumeRunId) {
+    try {
+      runState = await readRunState(resumeRunId);
+    } catch {
+      throw new Error(`Run not found: ${resumeRunId}`);
+    }
+    if (runState.state === 'completed') {
+      throw new Error(`Run ${resumeRunId} is already completed.`);
+    }
+  } else {
+    const objective = String(request?.task || '').trim();
+    if (!objective) {
+      throw new Error('Please provide an objective first.');
+    }
+    const threadContext = truncate(requestThreadContext, 1200);
+    const initialLimits = normalizeRunLimits(request?.runLimits, settings.runLimits || DEFAULT_RUN_LIMITS);
+    const initialNextFocus = threadContext
+      ? `${objective}\n\nConversation context:\n${threadContext}`
+      : objective;
+    runState = {
+      runId: crypto.randomUUID(),
+      objective,
+      state: 'running',
+      reason: '',
+      nextFocus: initialNextFocus,
+      iterations: [],
+      results: [],
+      remainingActions: initialLimits.maxActions,
+      maxIterations: initialLimits.maxIterations,
+      maxRuntimeMinutes: initialLimits.maxRuntimeMinutes,
+      maxModelCallsPerMinute: initialLimits.maxModelCallsPerMinute,
+      maxToolCallsPerMinute: initialLimits.maxToolCallsPerMinute,
+      idleTimeoutSeconds: initialLimits.idleTimeoutSeconds,
+      consecutiveDriftLimit: initialLimits.consecutiveDriftLimit,
+      consecutiveDriftIterations: 0,
+      runLimits: initialLimits,
+      lastProgressAt: new Date().toISOString(),
+      createdAt: new Date().toISOString(),
+      startedAt: new Date().toISOString(),
+      teamMode: selectedTeamMode,
+      executionMode: requestedExecutionMode,
+      provider: normalizeProvider(request?.provider || settings.provider),
+      baseUrl: normalizeBaseUrl(request?.baseUrl || settings.baseUrl, request?.provider || settings.provider),
+      threadContext,
+    };
+  }
+
+  const activeRunId = String(runState.runId || '');
+  if (activeRunId) {
+    activeRunIds.add(activeRunId);
+    clearRunStopRequest(activeRunId);
+  }
+
+  try {
+  const objective = String(runState.objective || '').trim();
+  if (!objective) {
+    throw new Error('Run objective is empty.');
+  }
+  const effectiveThreadContext = truncate(
+    String(requestThreadContext || runState.threadContext || '').trim(),
+    1200,
+  );
+  runState.threadContext = effectiveThreadContext;
+  runState.executionMode = resumeRunId
+    ? normalizeExecutionMode(runState.executionMode || requestedExecutionMode)
+    : requestedExecutionMode;
+  const objectivePolicy = applyExecutionModePolicy(
+    detectObjectivePolicy(objective),
+    runState.executionMode,
+  );
+  const objectivePolicyNotes = objectivePolicyPrompt(objectivePolicy);
+
+  runState.iterations = Array.isArray(runState.iterations) ? runState.iterations : [];
+  runState.results = Array.isArray(runState.results) ? runState.results : [];
+  runState.nextFocus = String(runState.nextFocus || objective);
+  if (effectiveThreadContext && runState.iterations.length === 0) {
+    const nextFocusLower = runState.nextFocus.toLowerCase();
+    if (!nextFocusLower.includes('conversation context:')) {
+      runState.nextFocus = `${objective}\n\nConversation context:\n${effectiveThreadContext}`;
+    }
+  }
+  runState.teamMode = request?.teamMode === 'solo'
+    ? 'solo'
+    : (runState.teamMode === 'solo' ? 'solo' : selectedTeamMode);
+  runState.provider = normalizeProvider(request?.provider || runState.provider || settings.provider);
+  const requestedRunLimits = {
+    ...(ensureObject(request?.runLimits)),
+  };
+  if (request?.maxIterations !== undefined) {
+    requestedRunLimits.maxIterations = request.maxIterations;
+  }
+  if (request?.maxRuntimeMinutes !== undefined) {
+    requestedRunLimits.maxRuntimeMinutes = request.maxRuntimeMinutes;
+  }
+  if (request?.maxActions !== undefined) {
+    requestedRunLimits.maxActions = request.maxActions;
+  }
+  const effectiveRunLimits = normalizeRunLimits(
+    Object.keys(requestedRunLimits).length > 0 ? requestedRunLimits : runState.runLimits,
+    settings.runLimits || DEFAULT_RUN_LIMITS,
+  );
+  runState.maxIterations = effectiveRunLimits.maxIterations;
+  runState.maxRuntimeMinutes = effectiveRunLimits.maxRuntimeMinutes;
+  runState.maxModelCallsPerMinute = effectiveRunLimits.maxModelCallsPerMinute;
+  runState.maxToolCallsPerMinute = effectiveRunLimits.maxToolCallsPerMinute;
+  runState.idleTimeoutSeconds = effectiveRunLimits.idleTimeoutSeconds;
+  runState.consecutiveDriftLimit = effectiveRunLimits.consecutiveDriftLimit;
+  runState.remainingActions = clampNumber(
+    Number(runState.remainingActions ?? effectiveRunLimits.maxActions),
+    0,
+    4000,
+    effectiveRunLimits.maxActions,
+  );
+  runState.runLimits = {
+    ...effectiveRunLimits,
+    maxActions: runState.remainingActions,
+  };
+  runState.lastProgressAt = String(runState.lastProgressAt || runState.startedAt || new Date().toISOString());
+  runState.consecutiveDriftIterations = clampNumber(
+    Number(runState.consecutiveDriftIterations || 0),
+    0,
+    999,
+    0,
+  );
+  const effectiveProvider = normalizeProvider(runState.provider || settings.provider);
+  const effectiveBaseUrl = normalizeBaseUrl(
+    request?.baseUrl
+      || runState.baseUrl
+      || (settings.provider === effectiveProvider ? settings.baseUrl : defaultBaseUrlForProvider(effectiveProvider)),
+    effectiveProvider,
+  );
+  const executionSettings = {
+    ...settings,
+    provider: effectiveProvider,
+    baseUrl: effectiveBaseUrl,
+    teamMode: runState.teamMode,
+    runLimits: settings.runLimits || DEFAULT_RUN_LIMITS,
+  };
+  const globalMemoryStart = await readGlobalMemory();
+
+  const resolvedModel = await resolveAgentModel(
+    executionSettings,
+    request?.model || runState.model || executionSettings.model,
+  );
+  let model = resolvedModel.model;
+  const requestedWorkspace = request?.workspaceRoot || runState.workspaceRoot || executionSettings.workspaceRoot;
+  const shouldAutoResolveWorkspace = !request?.workspaceRoot && (!requestedWorkspace || isHomeWorkspace(requestedWorkspace));
+  const workspaceChoice = shouldAutoResolveWorkspace
+    ? await chooseWorkspaceAndHints({
+      objective,
+      requestedWorkspace,
+      globalMemory: globalMemoryStart,
+    })
+    : {
+      workspaceRoot: requestedWorkspace || DEFAULT_WORKSPACE_ROOT,
+      discoveredPaths: [],
+      source: 'existing',
+    };
+  const workspaceRoot = resolveWorkspaceRoot(workspaceChoice.workspaceRoot || requestedWorkspace || DEFAULT_WORKSPACE_ROOT);
+  const discoveryHints = Array.from(new Set(
+    (Array.isArray(workspaceChoice.discoveredPaths) ? workspaceChoice.discoveredPaths : [])
+      .map((item) => String(item).trim())
+      .filter(Boolean),
+  )).slice(0, 30);
+  await writeSettings({
+    ...settings,
+    provider: effectiveProvider,
+    baseUrl: effectiveBaseUrl,
+    model,
+    workspaceRoot,
+    teamMode: runState.teamMode,
+  });
+
+  runState.model = model;
+  runState.baseUrl = effectiveBaseUrl;
+  runState.provider = effectiveProvider;
+  runState.workspaceRoot = workspaceRoot;
+  runState.workspaceDiscoverySource = workspaceChoice.source || 'existing';
+  runState.discoveryHints = Array.isArray(runState.discoveryHints) && runState.discoveryHints.length > 0
+    ? Array.from(new Set([...runState.discoveryHints, ...discoveryHints])).slice(-40)
+    : discoveryHints;
+  if (objectivePolicy.webResearchPreferred) {
+    runState.discoveryHints = [];
+  }
+  if (runState.iterations.length === 0 && !objectivePolicy.webResearchPreferred) {
+    const knownPaths = collectKnownPathsForObjective(globalMemoryStart, objective, workspaceRoot);
+    const hintPaths = Array.from(new Set([...knownPaths, ...(runState.discoveryHints || [])])).slice(0, 30);
+    if (hintPaths.length > 0) {
+      runState.nextFocus = [
+        runState.nextFocus || objective,
+        '',
+        'Known relevant artifact paths:',
+        ...hintPaths.map((item) => `- ${item}`),
+      ].join('\n');
+    }
+  }
+  runState.state = 'running';
+  runState.reason = '';
+  delete runState.blockedActions;
+  runState = await persistRunState(runState);
+
+  broadcastWatchEvent(runState.runId, {
+    type: resumeRunId ? 'run_resumed' : 'run_started',
+    summary: resumeRunId ? 'Run resumed.' : 'Run started.',
+  }, {
+    objective,
+    state: runState.state,
+    provider: runState.provider,
+    model: runState.model,
+    workspaceRoot,
+    teamMode: runState.teamMode,
+    executionMode: runState.executionMode,
+    createdAt: runState.createdAt,
+  });
+
+  if (resumeRunId) {
+    await appendAuditEvent({
+      type: 'objective_run_resumed',
+      run_id: runState.runId,
+      model,
+      provider: runState.provider,
+      team_mode: runState.teamMode,
+      execution_mode: runState.executionMode,
+      workspace_root: workspaceRoot,
+      workspace_discovery_source: runState.workspaceDiscoverySource,
+      objective: truncate(objective, 500),
+      max_model_calls_per_minute: runState.maxModelCallsPerMinute,
+      max_tool_calls_per_minute: runState.maxToolCallsPerMinute,
+      idle_timeout_seconds: runState.idleTimeoutSeconds,
+      consecutive_drift_limit: runState.consecutiveDriftLimit,
+    });
+  } else {
+    await appendAuditEvent({
+      type: 'objective_run_started',
+      run_id: runState.runId,
+      model,
+      provider: runState.provider,
+      team_mode: runState.teamMode,
+      execution_mode: runState.executionMode,
+      workspace_root: workspaceRoot,
+      workspace_discovery_source: runState.workspaceDiscoverySource,
+      objective: truncate(objective, 500),
+      max_iterations: runState.maxIterations,
+      max_runtime_minutes: runState.maxRuntimeMinutes,
+      max_actions: runState.remainingActions,
+      max_model_calls_per_minute: runState.maxModelCallsPerMinute,
+      max_tool_calls_per_minute: runState.maxToolCallsPerMinute,
+      idle_timeout_seconds: runState.idleTimeoutSeconds,
+      consecutive_drift_limit: runState.consecutiveDriftLimit,
+    });
+  }
+
+  let done = false;
+  let doneReason = 'Max iteration budget reached.';
+  let consecutiveFailedIterations = 0;
+  const maxRuntimeMs = runState.maxRuntimeMinutes * 60 * 1000;
+  const completedIterations = Array.isArray(runState.iterations) ? runState.iterations.length : 0;
+  const modelCallHits = [];
+  const toolCallHits = [];
+  const callGuards = {
+    beforeModelCall: () => {
+      enforcePerMinuteLimit(modelCallHits, runState.maxModelCallsPerMinute, 'model call');
+      runState.lastProgressAt = new Date().toISOString();
+    },
+    beforeToolCall: () => {
+      enforcePerMinuteLimit(toolCallHits, runState.maxToolCallsPerMinute, 'tool call');
+      runState.lastProgressAt = new Date().toISOString();
+    },
+  };
+
+  for (let iteration = completedIterations + 1; iteration <= runState.maxIterations; iteration += 1) {
+    if (isRunStopRequested(runState.runId)) {
+      doneReason = getRunStopReason(runState.runId) || 'Stopped by user request.';
+      break;
+    }
+    if (Date.now() - sessionStartedAt > maxRuntimeMs) {
+      doneReason = 'Stopped at runtime limit.';
+      break;
+    }
+    if (runState.remainingActions <= 0) {
+      doneReason = 'Stopped at action budget limit.';
+      break;
+    }
+    const lastProgressMs = new Date(runState.lastProgressAt || runState.updatedAt || runState.startedAt || Date.now()).getTime();
+    if (Number.isFinite(lastProgressMs) && (Date.now() - lastProgressMs) > (runState.idleTimeoutSeconds * 1000)) {
+      doneReason = `Stopped after ${runState.idleTimeoutSeconds}s with no progress.`;
+      break;
+    }
+
+    const progressSummary = summarizeRunHistory(runState.iterations, 5);
+    const nextFocus = String(runState.nextFocus || objective);
+    const iterationObjective = [
+      `Primary objective: ${objective}`,
+      `Execution mode: ${runState.executionMode}`,
+      `Current focus for this iteration: ${nextFocus}`,
+      'Non-negotiable: stay on this objective only.',
+      'Ignore unrelated previous tasks unless explicitly requested in the current objective.',
+      objectivePolicyNotes ? `Objective policy:\n${objectivePolicyNotes}` : '',
+      '',
+      'Progress so far:',
+      progressSummary,
+      '',
+      'Plan the next best actions only.',
+    ].join('\n');
+
+    const watchSeed = {
+      objective,
+      state: 'running',
+      provider: runState.provider,
+      model,
+      workspaceRoot,
+      teamMode: runState.teamMode,
+      executionMode: runState.executionMode,
+    };
+    const stopPlanningHeartbeat = startWatchHeartbeat(
+      runState.runId,
+      watchSeed,
+      (tick) => `Planning iteration ${iteration}... (${tick * 5}s)`,
+      5000,
+    );
+    let plan;
+    try {
+      throwIfRunStopped(runState.runId);
+      plan = await createAgentPlan({
+        settings: executionSettings,
+        model,
+        task: iterationObjective,
+        rootObjective: objective,
+        workspaceRoot,
+        teamMode: runState.teamMode,
+        historySummary: progressSummary,
+        discoveryHints: runState.discoveryHints || [],
+        runId: runState.runId,
+        iteration,
+        objectiveForWatch: objective,
+        objectivePolicy,
+        callGuards,
+        onTeamEvent: (event) => {
+          broadcastWatchEvent(runState.runId, {
+            ...event,
+            iteration,
+          }, watchSeed);
+        },
+      });
+    } catch (error) {
+      if (error instanceof StopRequestedError) {
+        doneReason = error.message || 'Stopped by user request.';
+        break;
+      }
+      if (error instanceof BudgetLimitError) {
+        doneReason = error.message || 'Stopped at budget limit.';
+        break;
+      }
+      throw error;
+    } finally {
+      stopPlanningHeartbeat();
+    }
+    model = plan.model || model;
+    runState.lastProgressAt = new Date().toISOString();
+
+    const stopExecutionHeartbeat = startWatchHeartbeat(
+      runState.runId,
+      watchSeed,
+      (tick) => `Executing iteration ${iteration}... (${tick * 5}s)`,
+      5000,
+    );
+    let execution;
+    try {
+      throwIfRunStopped(runState.runId);
+      execution = await executePlannedActions({
+        settings: executionSettings,
+        model,
+        task: objective,
+        workspaceRoot,
+        planSummary: plan.summary,
+        actions: plan.actions,
+        allowRisky,
+        maxActions: runState.remainingActions,
+        callGuards,
+        runMeta: {
+          run_id: runState.runId,
+          iteration,
+        },
+      });
+    } catch (error) {
+      if (error instanceof StopRequestedError) {
+        doneReason = error.message || 'Stopped by user request.';
+        break;
+      }
+      if (error instanceof BudgetLimitError) {
+        doneReason = error.message || 'Stopped at budget limit.';
+        break;
+      }
+      throw error;
+    } finally {
+      stopExecutionHeartbeat();
+    }
+
+    if (execution.requiresApproval) {
+      runState.state = 'paused_approval';
+      runState.reason = 'Paused for risky action approval.';
+      runState.blockedActions = execution.blockedActions;
+      runState = await persistRunState(runState);
+      await appendAuditEvent({
+        type: 'objective_run_paused_for_approval',
+        run_id: runState.runId,
+        model,
+        execution_mode: runState.executionMode,
+        workspace_root: workspaceRoot,
+        iteration,
+      });
+      broadcastWatchEvent(runState.runId, {
+        type: 'run_paused',
+        iteration,
+        summary: 'Paused for approval.',
+      }, {
+        objective,
+        state: runState.state,
+        provider: runState.provider,
+        model,
+        workspaceRoot,
+        teamMode: runState.teamMode,
+        executionMode: runState.executionMode,
+      });
+      return {
+        requiresApproval: true,
+        runId: runState.runId,
+        model,
+        provider: runState.provider,
+        teamMode: runState.teamMode,
+        executionMode: runState.executionMode,
+        runLimits: runState.runLimits,
+        workspaceDiscoverySource: runState.workspaceDiscoverySource,
+        workspaceRoot,
+        iteration,
+        summary: plan.summary,
+        blockedActions: execution.blockedActions,
+        workflow: buildWorkflowView(runState),
+      };
+    }
+
+    if (execution.stoppedByUser) {
+      doneReason = execution.stopReason || getRunStopReason(runState.runId) || 'Stopped by user request.';
+      break;
+    }
+
+    const iterationResults = execution.results.map((result) => ({
+      ...result,
+      iteration,
+    }));
+
+    runState.iterations.push({
+      iteration,
+      summary: plan.summary,
+      model,
+      teamBriefs: Array.isArray(plan.teamBriefs) ? plan.teamBriefs : [],
+      results: iterationResults,
+    });
+    runState.results.push(...iterationResults);
+    runState.remainingActions -= execution.results.length;
+    runState.model = model;
+    runState.lastProgressAt = new Date().toISOString();
+    const drifted = isIterationDrifted(iterationResults, objective, objectivePolicy);
+    runState.consecutiveDriftIterations = drifted
+      ? (Number(runState.consecutiveDriftIterations || 0) + 1)
+      : 0;
+
+    runState = await persistRunState(runState);
+
+    if (runState.consecutiveDriftIterations >= runState.consecutiveDriftLimit) {
+      doneReason = `Stopped after ${runState.consecutiveDriftIterations} off-track iteration(s). Please refine the objective.`;
+      break;
+    }
+
+    if (execution.state !== 'completed') {
+      consecutiveFailedIterations += 1;
+      const failed = iterationResults.find((item) => item.ok === false);
+      const failedText = failed
+        ? `${failed.tool} - ${failed.intent}. ${truncate(failed.output || failed.summary || '', 280)}`
+        : 'Unknown execution failure.';
+      runState.nextFocus = `Recover from previous execution failure: ${failedText}`;
+      runState.reason = `Iteration ${iteration} failed; retrying with recovery plan.`;
+      runState = await persistRunState(runState);
+
+      if (consecutiveFailedIterations >= 6) {
+        doneReason = `Stopped after ${consecutiveFailedIterations} consecutive failed iterations.`;
+        break;
+      }
+      continue;
+    }
+    consecutiveFailedIterations = 0;
+
+    const iterationSummaryText = iterationResults
+      .map((result) => `${result.ok ? 'OK' : 'FAILED'} ${result.tool}: ${result.intent}\n${truncate(result.output || '', 500)}`)
+      .join('\n\n');
+
+    const progress = await evaluateObjectiveProgress({
+      settings: executionSettings,
+      model,
+      objective,
+      workspaceRoot,
+      iterationSummary: iterationSummaryText,
+      remainingIterations: runState.maxIterations - iteration,
+      callGuards,
+    });
+
+    model = progress.model || model;
+    runState.model = model;
+    runState.nextFocus = progress.next_focus;
+
+    const reviewEvidence = hasSuccessfulReviewEvidence(runState.results);
+    if (progress.done && !reviewEvidence) {
+      runState.nextFocus = 'Run and pass QA verification steps (tests/lint/build/playwright) before completion.';
+      runState = await persistRunState(runState);
+      continue;
+    }
+    if (
+      progress.done
+      && objectiveNeedsPlaywright(objective)
+      && !runState.results.some((result) => result.ok && result.tool === 'run_playwright')
+    ) {
+      runState.nextFocus = 'Run Playwright browser validation and fix any issues before completion.';
+      runState = await persistRunState(runState);
+      continue;
+    }
+
+    if (progress.done) {
+      done = true;
+      doneReason = progress.reason || `Objective completed in ${iteration} iteration(s).`;
+      break;
+    }
+  }
+
+  const finalState = done ? 'completed' : 'stopped';
+  runState.state = finalState;
+  runState.reason = doneReason;
+  runState.model = model;
+
+  const stoppedByUser = doneReason.toLowerCase().includes('stopped by user');
+  const report = stoppedByUser
+    ? {
+      model,
+      report: [
+        'Run status: stopped by user.',
+        `Objective: ${objective}`,
+        `Workspace: ${workspaceRoot}`,
+        `Progress: ${runState.iterations.length} iteration(s), ${runState.results.length} action result(s) captured.`,
+      ].join('\n'),
+    }
+    : await summarizeExecution({
+      settings: executionSettings,
+      model,
+      task: objective,
+      workspaceRoot,
+      plan: { summary: `Autonomous run (${runState.iterations.length} iteration(s))` },
+      results: runState.results,
+      finalState,
+      callGuards,
+    });
+
+  runState.model = report.model || model;
+  runState.report = report.report;
+
+  const existingMemory = await readProjectMemory(workspaceRoot);
+  const globalMemory = await readGlobalMemory();
+  const discoveredArtifacts = (runState.discoveryHints || []).map((item) => {
+    const raw = String(item || '').trim();
+    if (!raw) {
+      return '';
+    }
+    const absolute = path.isAbsolute(raw) ? path.resolve(raw) : path.resolve(workspaceRoot, raw);
+    if (absolute === workspaceRoot || absolute.startsWith(`${workspaceRoot}${path.sep}`)) {
+      return path.relative(workspaceRoot, absolute) || '.';
+    }
+    return absolute;
+  }).filter(Boolean);
+  const runArtifacts = [...collectArtifactsFromResults(runState.results), ...discoveredArtifacts];
+  const newObjectives = [objective, ...existingMemory.recentObjectives]
+    .map((item) => String(item).trim())
+    .filter(Boolean)
+    .filter((item, index, array) => array.indexOf(item) === index)
+    .slice(0, 20);
+  const newNotes = [
+    doneReason,
+    runState.nextFocus,
+    ...pickPersistentNotesFromResults(runState.results, 8),
+  ]
+    .map((item) => String(item).trim())
+    .filter(Boolean);
+  const mergedNotes = [...existingMemory.notes, ...newNotes]
+    .filter((item, index, array) => array.indexOf(item) === index)
+    .slice(-60);
+  const mergedArtifacts = [...existingMemory.artifactPaths, ...runArtifacts]
+    .map((item) => String(item).trim())
+    .filter(Boolean)
+    .filter((item, index, array) => array.indexOf(item) === index)
+    .slice(-160);
+  await writeProjectMemory(workspaceRoot, {
+    recentObjectives: newObjectives,
+    notes: mergedNotes,
+    artifactPaths: mergedArtifacts,
+  });
+
+  const nextProjects = [...globalMemory.projects];
+  const existingProjectIndex = nextProjects.findIndex((item) => item.workspaceRoot === workspaceRoot);
+  const projectEntry = {
+    workspaceRoot,
+    label: inferProjectLabel(workspaceRoot, objective),
+    lastObjective: objective,
+    lastStatus: finalState,
+    artifactPaths: mergedArtifacts,
+    updatedAt: new Date().toISOString(),
+  };
+  if (existingProjectIndex >= 0) {
+    nextProjects[existingProjectIndex] = projectEntry;
+  } else {
+    nextProjects.push(projectEntry);
+  }
+
+  const globalNotes = [
+    ...globalMemory.userNotes,
+    `${new Date().toISOString()} | ${workspaceRoot} | ${finalState} | ${truncate(objective, 180)}`,
+    doneReason,
+  ].slice(-80);
+
+  await writeGlobalMemory({
+    ...globalMemory,
+    activeWorkspaceRoot: workspaceRoot,
+    projects: nextProjects.slice(-20),
+    userNotes: globalNotes,
+  });
+
+  runState = await persistRunState(runState);
+
+  await appendAuditEvent({
+    type: 'objective_run_finished',
+    run_id: runState.runId,
+    model: runState.model,
+    provider: runState.provider,
+    team_mode: runState.teamMode,
+    execution_mode: runState.executionMode,
+    workspace_root: workspaceRoot,
+    state: finalState,
+    reason: truncate(doneReason, 500),
+    iterations: runState.iterations.length,
+    total_actions: runState.results.length,
+  });
+
+  broadcastWatchEvent(runState.runId, {
+    type: 'run_finished',
+    summary: doneReason,
+  }, {
+    objective,
+    state: finalState,
+    provider: runState.provider,
+    model: runState.model,
+    workspaceRoot,
+    teamMode: runState.teamMode,
+    executionMode: runState.executionMode,
+  });
+
+  return {
+    requiresApproval: false,
+    runId: runState.runId,
+    state: finalState,
+    reason: doneReason,
+    model: runState.model,
+    provider: runState.provider,
+    teamMode: runState.teamMode,
+    executionMode: runState.executionMode,
+    runLimits: runState.runLimits,
+    workspaceDiscoverySource: runState.workspaceDiscoverySource,
+    workspaceRoot,
+    objective,
+    iterations: runState.iterations,
+    results: runState.results,
+    report: runState.report,
+    workflow: buildWorkflowView(runState),
+  };
+  } finally {
+    if (activeRunId) {
+      activeRunIds.delete(activeRunId);
+      activeChildrenByRun.delete(activeRunId);
+      clearRunStopRequest(activeRunId);
+    }
+  }
+}
+
+ipcMain.handle('settings:load', async () => {
+  const settings = await readSettings();
+  return {
+    ...settings,
+    availableProviders: Object.keys(PROVIDERS),
+    apiKeyPresent: Boolean(settings.apiKey),
+    apiKey: '',
+  };
+});
+
+ipcMain.handle('settings:save', async (_event, patch) => {
+  const current = await readSettings();
+  const next = {
+    ...current,
+    ...patch,
+  };
+
+  if (Object.prototype.hasOwnProperty.call(patch || {}, 'provider')) {
+    next.provider = normalizeProvider(patch.provider);
+    if (!Object.prototype.hasOwnProperty.call(patch || {}, 'baseUrl')) {
+      next.baseUrl = defaultBaseUrlForProvider(next.provider);
+    }
+  }
+
+  if (typeof patch.apiKey === 'string') {
+    next.apiKey = patch.apiKey.trim();
+  }
+
+  if (patch && typeof patch.runLimits === 'object' && !Array.isArray(patch.runLimits)) {
+    next.runLimits = normalizeRunLimits({
+      ...(current.runLimits || DEFAULT_RUN_LIMITS),
+      ...patch.runLimits,
+    }, current.runLimits || DEFAULT_RUN_LIMITS);
+  }
+
+  const saved = await writeSettings(next);
+  return {
+    ...saved,
+    availableProviders: Object.keys(PROVIDERS),
+    apiKeyPresent: Boolean(saved.apiKey),
+    apiKey: '',
+  };
+});
+
+ipcMain.handle('settings:clearKey', async () => {
+  const current = await readSettings();
+  const saved = await writeSettings({
+    ...current,
+    apiKey: '',
+  });
+
+  return {
+    ...saved,
+    availableProviders: Object.keys(PROVIDERS),
+    apiKeyPresent: false,
+    apiKey: '',
+  };
+});
+
+ipcMain.handle('models:list', async () => {
+  const settings = await readSettings();
+  if (!settings.apiKey) {
+    throw new Error('Add your API key first.');
+  }
+
+  const models = await listModels(settings.provider, settings.apiKey, settings.baseUrl);
+  if (models.length === 0) {
+    throw new Error('No models were returned for this API key.');
+  }
+
+  const currentModel = settings.model;
+  const model = pickBestModel(models, currentModel);
+
+  if (model !== currentModel) {
+    await writeSettings({ ...settings, model });
+  }
+
+  return {
+    provider: settings.provider,
+    models,
+    selectedModel: model,
+  };
+});
+
+ipcMain.handle('connector:test', async (_event, preferredModel) => {
+  const settings = await readSettings();
+  if (!settings.apiKey) {
+    throw new Error('Add your API key first.');
+  }
+
+  const models = await listModels(settings.provider, settings.apiKey, settings.baseUrl);
+  if (models.length === 0) {
+    throw new Error('No models available for this key.');
+  }
+  const model = pickBestModel(models, preferredModel || settings.model);
+  if (model !== settings.model) {
+    await writeSettings({ ...settings, model });
+  }
+
+  const result = await callResponsesWithFallback({
+    settings,
+    model,
+    input: 'Reply with exactly: Geepus is connected.',
+  });
+
+  return {
+    provider: settings.provider,
+    model: result.model,
+    message: extractOutputText(settings.provider, result.payload),
+  };
+});
+
+ipcMain.handle('assistant:ask', async (_event, request) => {
+  const baseSettings = await readSettings();
+  const provider = normalizeProvider(request?.provider || baseSettings.provider);
+  const settings = {
+    ...baseSettings,
+    provider,
+    baseUrl: normalizeBaseUrl(
+      request?.baseUrl
+        || (provider === baseSettings.provider ? baseSettings.baseUrl : defaultBaseUrlForProvider(provider)),
+      provider,
+    ),
+  };
+  if (!settings.apiKey) {
+    throw new Error('Add your API key first.');
+  }
+
+  const prompt = typeof request?.prompt === 'string' ? request.prompt.trim() : '';
+  if (!prompt) {
+    throw new Error('Please type a request first.');
+  }
+  const history = Array.isArray(request?.history) ? request.history : [];
+  const normalizedHistory = history
+    .filter((item) => item && typeof item === 'object')
+    .map((item) => ({
+      role: String(item.role || 'user').trim().toLowerCase() === 'assistant' ? 'assistant' : 'user',
+      content: String(item.content || '').trim(),
+    }))
+    .filter((item) => item.content.length > 0)
+    .slice(-20);
+
+  let model = typeof request?.model === 'string' && request.model.trim().length > 0
+    ? request.model.trim()
+    : settings.model;
+  const mode = String(request?.mode || 'chat').toLowerCase();
+
+  if (!model) {
+    const models = await listModels(settings.provider, settings.apiKey, settings.baseUrl);
+    if (models.length === 0) {
+      throw new Error('No models available for this key.');
+    }
+    model = models[0];
+    await writeSettings({ ...settings, model });
+  }
+
+  const systemPrompt = mode === 'planning'
+    ? [
+      'You are Geepus in Planning Mode.',
+      'Collaborate with the user to shape a clear, practical plan.',
+      'Do not execute actions or claim execution happened.',
+      'Be concise, friendly, and concrete.',
+      'End with a short "Ready to run" checklist for Research Mode and Action Mode.',
+    ].join(' ')
+    : [
+      'You are Geepus, a practical digital chief-of-staff assistant.',
+      'Be concise, friendly, and action-oriented.',
+      'When useful, structure your answer into next steps.',
+      'Do not claim inability to access tools. If direct execution is requested, tell the user to switch to Research Mode or Action Mode in one sentence.',
+      'Never claim a file was created unless the user explicitly confirms it or the path is provided in context.',
+    ].join(' ');
+
+  const result = await callResponsesWithFallback({
+    settings,
+    model,
+    input: [
+      {
+        role: 'system',
+        content: systemPrompt,
+      },
+      ...normalizedHistory,
+      {
+        role: 'user',
+        content: prompt,
+      },
+    ],
+    temperature: 0.4,
+  });
+
+  return {
+    provider: settings.provider,
+    model: result.model,
+    answer: extractOutputText(settings.provider, result.payload),
+  };
+});
+
+ipcMain.handle('agent:plan', async (_event, request) => {
+  const baseSettings = await readSettings();
+  const provider = normalizeProvider(request?.provider || baseSettings.provider);
+  const settings = {
+    ...baseSettings,
+    provider,
+    baseUrl: normalizeBaseUrl(
+      request?.baseUrl
+        || (provider === baseSettings.provider ? baseSettings.baseUrl : defaultBaseUrlForProvider(provider)),
+      provider,
+    ),
+    teamMode: request?.teamMode === 'solo' ? 'solo' : (baseSettings.teamMode === 'solo' ? 'solo' : 'teams'),
+  };
+  if (!settings.apiKey) {
+    throw new Error('Add your API key first.');
+  }
+
+  const task = String(request?.task || '').trim();
+  if (!task) {
+    throw new Error('Please provide a task first.');
+  }
+
+  const resolvedModel = await resolveAgentModel(settings, request?.model);
+  const model = resolvedModel.model;
+
+  const workspaceRoot = resolveWorkspaceRoot(request?.workspaceRoot || settings.workspaceRoot);
+  await writeSettings({ ...settings, model, workspaceRoot, provider: settings.provider, teamMode: settings.teamMode });
+
+  return createAgentPlan({
+    settings: {
+      ...settings,
+      model,
+      workspaceRoot,
+    },
+    model,
+    task,
+    workspaceRoot,
+    teamMode: settings.teamMode,
+  });
+});
+
+ipcMain.handle('agent:execute', async (_event, request) => {
+  const baseSettings = await readSettings();
+  const provider = normalizeProvider(request?.provider || baseSettings.provider);
+  const settings = {
+    ...baseSettings,
+    provider,
+    baseUrl: normalizeBaseUrl(
+      request?.baseUrl
+        || (provider === baseSettings.provider ? baseSettings.baseUrl : defaultBaseUrlForProvider(provider)),
+      provider,
+    ),
+    teamMode: request?.teamMode === 'solo' ? 'solo' : (baseSettings.teamMode === 'solo' ? 'solo' : 'teams'),
+  };
+  if (!settings.apiKey) {
+    throw new Error('Add your API key first.');
+  }
+
+  const task = String(request?.task || '').trim();
+  if (!task) {
+    throw new Error('Please provide a task first.');
+  }
+
+  const model = typeof request?.model === 'string' && request.model.trim().length > 0
+    ? request.model.trim()
+    : (await resolveAgentModel(settings, settings.model)).model;
+  const workspaceRoot = resolveWorkspaceRoot(request?.workspaceRoot || settings.workspaceRoot);
+  const allowRisky = request?.allowRisky === true;
+  const plan = ensureObject(request?.plan);
+  const execution = await executePlannedActions({
+    settings,
+    model,
+    task,
+    workspaceRoot,
+    planSummary: String(plan.summary || 'Agent plan'),
+    actions: Array.isArray(plan.actions) ? plan.actions : [],
+    allowRisky,
+    maxActions: clampNumber(Number(request?.maxActions || 120), 1, 500, 120),
+  });
+
+  if (execution.requiresApproval) {
+    return execution;
+  }
+
+  const finalState = execution.state;
+  const report = await summarizeExecution({
+    settings,
+    model,
+    task,
+    workspaceRoot,
+    plan: { summary: execution.summary },
+    results: execution.results,
+    finalState,
+  });
+
+  await appendAuditEvent({
+    type: 'agent_execution_finished',
+    model: report.model || model,
+    workspace_root: workspaceRoot,
+    state: finalState,
+    total_actions: execution.results.length,
+    succeeded_actions: execution.results.filter((entry) => entry.ok).length,
+    task_summary: truncate(task, 400),
+  });
+
+  return {
+    requiresApproval: false,
+    state: finalState,
+    provider: settings.provider,
+    model: report.model || model,
+    workspaceRoot,
+    summary: execution.summary,
+    results: execution.results,
+    report: report.report,
+  };
+});
+
+ipcMain.handle('agent:runObjective', async (_event, request) => {
+  const settings = await readSettings();
+  return runObjectiveCore(settings, request);
+});
+
+ipcMain.handle('agent:resumeObjective', async (_event, request) => {
+  const settings = await readSettings();
+  return runObjectiveCore(settings, {
+    ...request,
+    resumeRunId: String(request?.runId || request?.resumeRunId || ''),
+  });
+});
+
+ipcMain.handle('agent:stopObjective', async (_event, request) => {
+  const requestedRunId = String(request?.runId || '').trim();
+  let runId = requestedRunId;
+
+  if (!runId && activeRunIds.size > 0) {
+    runId = Array.from(activeRunIds).slice(-1)[0] || '';
+  }
+  if (!runId) {
+    const runs = await listRunStates(20);
+    runId = (runs.find((run) => run.state === 'running' || run.state === 'paused_approval') || {}).runId || '';
+  }
+  if (!runId) {
+    return {
+      ok: false,
+      runId: '',
+      message: 'No running task found.',
+    };
+  }
+
+  const reason = 'Stopped by user request.';
+  requestRunStop(runId, reason);
+
+  let runState = null;
+  try {
+    runState = await readRunState(runId);
+    runState.state = 'stopped';
+    runState.reason = reason;
+    runState.updatedAt = new Date().toISOString();
+    await persistRunState(runState);
+  } catch {
+    // If run file is unavailable, stop signal still applies to in-memory run.
+  }
+
+  await appendAuditEvent({
+    type: 'objective_run_stop_requested',
+    run_id: runId,
+    reason,
+  });
+
+  broadcastWatchEvent(runId, {
+    type: 'run_stop_requested',
+    owner: 'chief',
+    summary: reason,
+  }, {
+    objective: runState?.objective || '',
+    state: 'stopped',
+    provider: runState?.provider || DEFAULT_PROVIDER,
+    model: runState?.model || '',
+    workspaceRoot: runState?.workspaceRoot || '',
+    teamMode: runState?.teamMode || 'teams',
+  });
+
+  return {
+    ok: true,
+    runId,
+    message: 'Stop requested. Geepus will halt this task shortly.',
+  };
+});
+
+ipcMain.handle('agent:listRuns', async () => {
+  const runs = await listRunStates(200);
+  return runs.map((run) => ({
+    ...summarizeRunForList(run),
+    workflow: buildWorkflowView(run),
+  }));
+});
+
+ipcMain.handle('agent:listArtifacts', async (_event, request) => {
+  const limit = clampNumber(Number(request?.limit || 40), 1, 200, 40);
+  const runs = await listRunStates(200);
+  const output = [];
+  const seen = new Set();
+
+  for (const run of runs) {
+    const paths = collectWrittenArtifactsFromRun(run);
+    for (const artifactPath of paths) {
+      if (!artifactPath || seen.has(artifactPath)) {
+        continue;
+      }
+      seen.add(artifactPath);
+      output.push({
+        path: artifactPath,
+        runId: String(run.runId || ''),
+        objective: String(run.objective || ''),
+        updatedAt: run.updatedAt || run.startedAt || run.createdAt || null,
+        executionMode: normalizeExecutionMode(run.executionMode || 'action'),
+      });
+      if (output.length >= limit) {
+        return output;
+      }
+    }
+  }
+
+  return output;
+});
+
+ipcMain.handle('watch:open', async (_event, request) => {
+  const requestedRunId = String(request?.runId || '').trim();
+  let runId = requestedRunId;
+
+  if (!runId) {
+    const runs = await listRunStates(1);
+    runId = runs[0]?.runId || '';
+  }
+
+  if (runId && !watchStateByRun.has(runId)) {
+    try {
+      const runState = await readRunState(runId);
+      hydrateWatchFromRunState(runState);
+    } catch {
+      // Ignore missing run state; window can still open and wait for events.
+    }
+  }
+
+  createWatchWindow(runId);
+  return { ok: true, runId };
+});
+
+ipcMain.handle('watch:snapshot', async (_event, request) => {
+  const requestedRunId = String(request?.runId || '').trim();
+  let runId = requestedRunId;
+  if (!runId) {
+    const runs = await listRunStates(1);
+    runId = runs[0]?.runId || '';
+  }
+  if (!runId) {
+    return {
+      runId: '',
+      objective: '',
+      state: 'idle',
+      provider: DEFAULT_PROVIDER,
+      model: '',
+      workspaceRoot: '',
+      teamMode: 'teams',
+      executionMode: 'action',
+      agents: defaultWatchAgents('teams', 'action'),
+      events: [],
+    };
+  }
+
+  if (!watchStateByRun.has(runId)) {
+    try {
+      const runState = await readRunState(runId);
+      hydrateWatchFromRunState(runState);
+    } catch {
+      // Ignore; fallback below.
+    }
+  }
+
+  const snapshot = watchSnapshot(runId);
+  if (snapshot) {
+    return snapshot;
+  }
+
+  return {
+    runId,
+    objective: '',
+    state: 'unknown',
+    provider: DEFAULT_PROVIDER,
+    model: '',
+    workspaceRoot: '',
+    teamMode: 'teams',
+    executionMode: 'action',
+    agents: defaultWatchAgents('teams', 'action'),
+    events: [],
+  };
+});
+
+ipcMain.handle('app:restart', async () => {
+  app.relaunch();
+  app.exit(0);
+});
+
+app.whenReady().then(createWindow);
+
+app.on('window-all-closed', () => {
+  if (process.platform !== 'darwin') {
+    app.quit();
+  }
+});
+
+app.on('activate', () => {
+  if (BrowserWindow.getAllWindows().length === 0) {
+    createWindow();
+  }
+});

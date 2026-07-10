@@ -1,0 +1,935 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Geepus</title>
+  <link rel="stylesheet" href="styles.css" />
+  <script>
+    // Prevent file drops from navigating the window.
+    // Registered here (before any renderer module) to ensure it runs even if
+    // later scripts error out. Capture phase fires before any element handler.
+    (function () {
+      function block(e) { e.preventDefault(); e.stopPropagation(); }
+      document.addEventListener('dragover', block, true);
+      document.addEventListener('drop', block, true);
+    })();
+  </script>
+</head>
+
+<body>
+  <!-- Full-window drag-and-drop overlay -->
+  <div id="dropOverlay" class="drop-overlay" hidden>
+    <div class="drop-overlay-inner">
+      <span class="drop-overlay-icon">📎</span>
+      <span class="drop-overlay-label">Drop files to attach</span>
+      <span class="drop-overlay-hint">Images, screenshots, text files</span>
+    </div>
+  </div>
+  <main class="layout-shell">
+    <aside class="sidebar">
+      <div class="brand-block">
+        <div class="brand-top">
+          <div>
+            <div class="brand-title-row">
+              <h1>Geepus</h1>
+              <span id="appVersionBadge" class="app-version-badge">v?</span>
+            </div>
+            <p>Focused desktop assistant for getting work done in chat.</p>
+          </div>
+          <button id="openSettingsPageButton" class="settings-gear-btn" type="button" title="Settings">
+            <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6"
+              stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="10" cy="10" r="3" />
+              <path
+                d="M16.47 12.36a1.28 1.28 0 0 0 .26 1.41l.05.05a1.55 1.55 0 1 1-2.19 2.19l-.05-.05a1.28 1.28 0 0 0-1.41-.26 1.28 1.28 0 0 0-.78 1.17v.14a1.55 1.55 0 1 1-3.1 0v-.07A1.28 1.28 0 0 0 8.41 15.6a1.28 1.28 0 0 0-1.41.26l-.05.05a1.55 1.55 0 1 1-2.19-2.19l.05-.05A1.28 1.28 0 0 0 5.07 12.26a1.28 1.28 0 0 0-1.17-.78h-.14a1.55 1.55 0 0 1 0-3.1h.07A1.28 1.28 0 0 0 5.17 7.54a1.28 1.28 0 0 0-.26-1.41l-.05-.05a1.55 1.55 0 1 1 2.19-2.19l.05.05a1.28 1.28 0 0 0 1.41.26h.06a1.28 1.28 0 0 0 .78-1.17v-.14a1.55 1.55 0 0 1 3.1 0v.07a1.28 1.28 0 0 0 .78 1.17 1.28 1.28 0 0 0 1.41-.26l.05-.05a1.55 1.55 0 1 1 2.19 2.19l-.05.05a1.28 1.28 0 0 0-.26 1.41v.06a1.28 1.28 0 0 0 1.17.78h.14a1.55 1.55 0 0 1 0 3.1h-.07a1.28 1.28 0 0 0-1.17.78z" />
+            </svg>
+          </button>
+        </div>
+        <div id="connectionBadge" class="badge badge-warn">Not connected</div>
+      </div>
+
+      <section class="sidebar-card">
+        <div class="threads-head">
+          <h2>Threads</h2>
+          <button id="newThreadButton" class="btn btn-small" type="button">New</button>
+        </div>
+        <label>
+          Find thread
+          <input id="threadSearchInput" type="text" placeholder="Search by project or objective" />
+        </label>
+        <div id="threadList" class="thread-list"></div>
+      </section>
+
+    </aside>
+
+    <section class="main-pane chat-layout">
+      <!-- Hidden state targets read by renderer-utils -->
+      <p id="missionStatusLine" hidden></p>
+      <p id="missionWorkspaceLine" hidden></p>
+      <p id="missionModelLine" hidden></p>
+
+      <section class="card response-card">
+        <div id="responseOutput" class="response-body">No messages yet. Ask Geepus to start this thread.</div>
+      </section>
+
+      <section class="card ask-card" id="askCard">
+        <div class="ask-head">
+          <div class="ask-head-left">
+            <h2>Geepus</h2>
+            <div class="mission-pills">
+              <span id="missionConnectionPill" class="mission-pill">Offline</span>
+              <span id="missionModePill" class="mission-pill">Auto</span>
+              <span id="missionRunPill" class="mission-pill">Idle</span>
+            </div>
+          </div>
+          <div class="response-head-actions">
+            <span id="responseModel" class="mini-label"></span>
+          </div>
+        </div>
+
+        <div class="mode-switch" role="tablist" aria-label="Task mode" hidden>
+          <button id="planningModeButton" class="mode-btn active" type="button">Planning Mode</button>
+          <button id="researchModeButton" class="mode-btn" type="button">Research Mode</button>
+          <button id="actionModeButton" class="mode-btn" type="button">Action Mode</button>
+          <button id="autoModeButton" class="mode-btn" type="button">Auto Mode</button>
+        </div>
+
+        <div class="prompt-drop-zone" id="promptDropZone">
+          <textarea id="promptInput" rows="3"
+            placeholder="Ask Geepus anything…"></textarea>
+        </div>
+        <input type="file" id="attachFileInput" multiple
+          accept="image/*,.txt,.md,.js,.ts,.json,.csv,.html,.css,.py,.sh,.yaml,.yml,.xml,.log" hidden />
+        <!-- threadBudgetInput kept for renderer compatibility, hidden from view -->
+        <input id="threadBudgetInput" type="number" min="0" step="0.10" value="1.00" hidden />
+        <p id="modeDescription" class="mode-description" hidden></p>
+        <div class="attachment-chips" id="attachmentChips" hidden></div>
+
+        <div class="actions-row">
+          <button id="askButton" class="btn btn-primary">Send</button>
+          <button id="stopTaskButton" class="btn btn-danger" type="button" disabled>Stop</button>
+          <button id="clearPromptButton" class="btn">Clear</button>
+          <button id="attachFileButton" class="btn btn-attach" type="button" title="Attach files">📎</button>
+          <button id="voiceMicButton" class="btn btn-voice" type="button" title="Talk to Geepus">🎙</button>
+        </div>
+
+        <p id="voiceInputLevelInline" class="status-line voice-level-line" hidden>Mic level: idle</p>
+        <p id="statusLine" class="status-line">Ready.</p>
+      </section>
+
+      <details class="card workflow-card secondary-panel">
+        <summary>Diagnostics</summary>
+
+        <section class="readiness-card compact-section">
+          <div class="readiness-head">
+            <h2>Production Readiness</h2>
+            <span id="readinessBadge" class="readiness-badge unknown">Unknown</span>
+          </div>
+          <p id="readinessSummary" class="readiness-summary">Start a task to see readiness checks.</p>
+          <ul id="readinessChecklist" class="readiness-list">
+            <li class="readiness-item neutral">No readiness checks yet.</li>
+          </ul>
+        </section>
+
+        <section class="readiness-card compact-section">
+          <div class="readiness-head">
+            <h2>Active Memory</h2>
+            <span id="memoryConstraintBadge" class="readiness-badge unknown">Idle</span>
+          </div>
+          <p id="memoryConstraintSummary" class="readiness-summary">No active learned constraints yet.</p>
+          <ul id="memoryConstraintList" class="readiness-list">
+            <li class="readiness-item neutral">Run a task to see active strategies and banned approaches.</li>
+          </ul>
+        </section>
+
+        <div class="workflow-board compact-top">
+          <div class="workflow-lane">
+            <h3>Planner</h3>
+            <ul id="plannerLane" class="lane-list"></ul>
+          </div>
+          <div class="workflow-lane">
+            <h3>Builder</h3>
+            <ul id="builderLane" class="lane-list"></ul>
+          </div>
+          <div class="workflow-lane">
+            <h3>Reviewer</h3>
+            <ul id="reviewerLane" class="lane-list"></ul>
+          </div>
+        </div>
+        <h3 class="checkpoint-title">Checkpoints</h3>
+        <ul id="checkpointList" class="checkpoint-list"></ul>
+      </details>
+    </section>
+  </main>
+
+  <!-- ═══ Settings Page (full-screen overlay) ═══ -->
+  <div id="settingsPage" class="settings-page" hidden>
+    <div class="settings-page-header">
+      <h1>Settings</h1>
+      <button id="closeSettingsPageButton" class="btn settings-close-btn" type="button">✕ Close</button>
+    </div>
+
+    <div class="settings-page-body">
+      <div class="settings-tabs" role="tablist" aria-label="Settings sections">
+        <button class="settings-tab-btn active" type="button" data-settings-tab-target="core">Core</button>
+        <button class="settings-tab-btn" type="button" data-settings-tab-target="models">Local Models</button>
+        <button class="settings-tab-btn" type="button" data-settings-tab-target="voice">Voice</button>
+        <button class="settings-tab-btn" type="button" data-settings-tab-target="integrations">Integrations</button>
+        <button class="settings-tab-btn" type="button" data-settings-tab-target="identity">Identity</button>
+        <button class="settings-tab-btn" type="button" data-settings-tab-target="learning">Learning</button>
+        <button class="settings-tab-btn" type="button" data-settings-tab-target="automation">Automation</button>
+        <button class="settings-tab-btn" type="button" data-settings-tab-target="security">Security</button>
+        <button class="settings-tab-btn" type="button" data-settings-tab-target="operations">Operations</button>
+      </div>
+
+      <!-- ── Connection ── -->
+      <section class="settings-section settings-tab-panel" data-settings-tab="core">
+        <h2 class="settings-section-title">Connection</h2>
+        <div class="setup-grid settings-connection">
+          <label class="key-label">
+            OpenAI API Key
+            <div class="key-row">
+              <input id="openaiApiKeyInput" type="password" placeholder="sk-..." autocomplete="off" />
+              <button id="toggleOpenAiKeyButton" class="btn btn-small" type="button">Show</button>
+            </div>
+          </label>
+          <label class="key-label">
+            Anthropic API Key
+            <div class="key-row">
+              <input id="anthropicApiKeyInput" type="password" placeholder="sk-ant-..." autocomplete="off" />
+              <button id="toggleAnthropicKeyButton" class="btn btn-small" type="button">Show</button>
+            </div>
+          </label>
+          <div class="setup-actions">
+            <button id="saveKeyButton" class="btn">Connect Geepus</button>
+          </div>
+          <div id="connectionStatusBadge" class="conn-status" hidden></div>
+        </div>
+      </section>
+
+      <!-- ── Local Models (Ollama) ── -->
+      <section id="localModelsPanel" class="settings-section local-models-panel settings-tab-panel"
+        data-settings-tab="models" hidden>
+        <div class="step-head">
+          <h2 class="settings-section-title">Local Models</h2>
+          <span id="ollamaStatusPill" class="step-pill">Checking…</span>
+        </div>
+        <p class="wizard-hint" id="ollamaHint">Pick a model below and Geepus will download it for you.</p>
+        <div id="localModelCatalog" class="local-model-catalog"></div>
+        <div class="setup-actions" id="ollamaInstallPrompt" hidden>
+          <p class="wizard-hint">Ollama isn't installed yet. It's free and takes under a minute:</p>
+          <button id="ollamaInstallButton" class="btn">Download Ollama (free)</button>
+          <button id="ollamaRecheckButton" class="btn">I've installed it — Recheck</button>
+        </div>
+      </section>
+
+      <!-- ── Model & Preferences ── -->
+      <section class="settings-section settings-tab-panel" data-settings-tab="core">
+        <h2 class="settings-section-title">Model &amp; Preferences</h2>
+        <div class="setup-grid">
+          <label>
+            AI Service
+            <select id="providerSelect">
+              <option value="auto">Auto (Best for Task)</option>
+              <option value="openai">OpenAI</option>
+              <option value="anthropic">Anthropic</option>
+              <option value="ollama">Ollama (Local)</option>
+            </select>
+          </label>
+          <label>
+            Model
+            <div class="key-row">
+              <select id="modelQuickSelect"></select>
+              <select id="modelSelect" style="display:none"></select>
+            </div>
+          </label>
+          <label>
+            Execution Core
+            <select id="executionCoreSelect">
+              <option value="geepus">Geepus Classic</option>
+              <option value="nanobot">Nanobot Native</option>
+            </select>
+          </label>
+          <label>
+            Agent Team
+            <select id="teamModeSelect">
+              <option value="all">All Agents (Chief of Staff selects)</option>
+              <option value="dev">Dev Team (build software)</option>
+              <option value="marketing">Marketing Team (content, growth, brand)</option>
+              <option value="ops">Ops &amp; Cost Team (optimize spending)</option>
+              <option value="solo">Solo (no team planning)</option>
+            </select>
+          </label>
+          <label>
+            Project Folder <span class="hint">(optional)</span>
+            <input id="workspaceRootInput" type="text" placeholder="Leave blank for Auto-Find" />
+          </label>
+          <label>
+            API Base URL <span class="hint">(advanced)</span>
+            <input id="baseUrlInput" type="text" value="https://api.openai.com/v1" />
+          </label>
+          <label>
+            Brave Search API Key <span class="hint">(optional — enables web_search tool)</span>
+            <input id="braveSearchApiKeyInput" type="password" placeholder="BSA-xxxxxxxx" />
+          </label>
+          <label>
+            Firecrawl API Key <span class="hint">(optional fallback — Cloudflare bypass for web_fetch)</span>
+            <input id="firecrawlApiKeyInput" type="password" placeholder="fc-xxxxxxxx" />
+          </label>
+          <div class="setup-actions">
+            <button id="refreshModelsInlineButton" class="btn">Refresh Models</button>
+            <button id="listModelsButton" class="btn">Find Models</button>
+            <button id="testButton" class="btn">Test</button>
+            <button id="useAutoFindButton" class="btn">Auto-Find</button>
+            <button id="clearKeyButton" class="btn">Clear Key</button>
+            <button id="restartButton" class="btn">Restart App</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- ── Run Limits ── -->
+      <section class="settings-section settings-tab-panel" data-settings-tab="core">
+        <h2 class="settings-section-title">Run Limits</h2>
+        <p class="hint">Geepus will auto-stop when any limit is reached.</p>
+        <div class="run-limits-grid">
+          <label>
+            Max runtime (minutes)
+            <input id="limitMaxRuntimeMinutes" type="number" min="1" max="720" step="1" />
+          </label>
+          <label>
+            Budget limit ($)
+            <input id="limitBudgetLimit" type="number" min="0" max="100" step="0.01" />
+          </label>
+          <label>
+            Max iterations
+            <input id="limitMaxIterations" type="number" min="1" max="120" step="1" />
+          </label>
+          <label>
+            Max actions
+            <input id="limitMaxActions" type="number" min="1" max="4000" step="1" />
+          </label>
+          <label>
+            Model calls / minute
+            <input id="limitMaxModelCallsPerMinute" type="number" min="1" max="240" step="1" />
+          </label>
+          <label>
+            Tool calls / minute
+            <input id="limitMaxToolCallsPerMinute" type="number" min="1" max="480" step="1" />
+          </label>
+          <label>
+            Idle timeout (seconds)
+            <input id="limitIdleTimeoutSeconds" type="number" min="30" max="1800" step="1" />
+          </label>
+          <label>
+            Off-track iterations
+            <input id="limitConsecutiveDriftLimit" type="number" min="1" max="20" step="1" />
+          </label>
+        </div>
+      </section>
+
+      <!-- ═══ Voice Tab ═══ -->
+      <section class="settings-section settings-tab-panel" data-settings-tab="voice" hidden>
+        <h2 class="settings-section-title">Voice Assistant</h2>
+        <div class="setup-grid">
+          <label class="voice-toggle">
+            <input id="voiceEnabledToggle" type="checkbox" />
+            Enable voice mode
+          </label>
+          <label class="voice-toggle">
+            <input id="voiceAutoSpeakToggle" type="checkbox" />
+            Speak replies out loud
+          </label>
+          <label class="voice-toggle">
+            <input id="voiceAutoSendToggle" type="checkbox" />
+            Auto-send after dictation
+          </label>
+          <label class="voice-toggle">
+            <input id="voiceRealtimeToggle" type="checkbox" />
+            Low-latency realtime dictation
+          </label>
+          <div id="voiceOpenaiKeyRow" class="voice-api-key-row">
+            <label>
+              OpenAI API Key <span class="hint">(for voice transcription)</span>
+              <div class="key-row">
+                <input id="voiceOpenaiKeyInput" type="password" placeholder="sk-..." autocomplete="off"
+                  spellcheck="false" />
+              </div>
+            </label>
+            <p class="hint">Voice dictation uses OpenAI transcription models. When your main provider isn't OpenAI,
+              enter an OpenAI key here.</p>
+          </div>
+          <label>
+            Voice Transcription Model
+            <select id="voiceTranscriptionModelSelect">
+              <option value="">Auto (Recommended)</option>
+            </select>
+          </label>
+          <label>
+            Speaking Voice
+            <select id="voiceNameSelect">
+              <option value="">Auto (Recommended)</option>
+            </select>
+          </label>
+          <label>
+            Reply Style
+            <select id="voiceReplyStyleSelect">
+              <option value="concise">Concise (recommended)</option>
+              <option value="balanced">Balanced</option>
+            </select>
+          </label>
+          <label>
+            Microphone
+            <div class="key-row">
+              <select id="voiceInputDeviceSelect">
+                <option value="">System default</option>
+              </select>
+              <button id="voiceRefreshDevicesButton" class="btn btn-small" type="button">Refresh</button>
+            </div>
+          </label>
+          <p id="voiceInputLevelHint" class="hint">Mic level: idle</p>
+          <label>
+            Speech Rate
+            <input id="voiceRateInput" type="range" min="0.75" max="1.35" step="0.05" value="0.95" />
+            <span id="voiceRateValue" class="hint">0.95x</span>
+          </label>
+          <p id="voiceSupportHint" class="hint">Checking voice support...</p>
+        </div>
+      </section>
+
+      <!-- ═══ Integrations Tab ═══ -->
+      <section class="settings-section settings-tab-panel" data-settings-tab="integrations" hidden>
+        <h2 class="settings-section-title">Integrations</h2>
+        <div class="setup-grid">
+          <h3 style="margin:0;font-size:13px;">Chrome Extension (Anti-Bot Bypass)</h3>
+          <p class="hint" style="margin-top:4px; margin-bottom:12px">Load the local Geepus extension into Chrome to
+            bypass Cloudflare and anti-bot protections when fetching pages.</p>
+          <ol class="hint" style="margin-top:0; padding-left:20px;">
+            <li>Open Chrome and go to <code>chrome://extensions/</code></li>
+            <li>Enable <strong>Developer mode</strong> (top right toggle)</li>
+            <li>Click <strong>Load unpacked</strong> and select this folder:<br />
+              <code
+                style="user-select:all; cursor:pointer;">/Users/geoffbaron/Desktop/geepus/electron-geepus/extension</code>
+            </li>
+          </ol>
+
+          <h3 style="margin:16px 0 0;font-size:13px;">GitHub</h3>
+          <label>
+            Personal Access Token
+            <input id="githubTokenInput" type="password" placeholder="ghp_xxxxxxxxxxxx" autocomplete="off" />
+          </label>
+          <label>
+            Default Repo <span class="hint">(owner/repo)</span>
+            <input id="githubDefaultRepoInput" type="text" placeholder="owner/repo" />
+          </label>
+          <div class="setup-actions">
+            <button id="saveGithubButton" class="btn btn-small" type="button">Save GitHub</button>
+          </div>
+
+          <h3 style="margin:8px 0 0;font-size:13px;">Slack / Discord Webhook</h3>
+          <label>
+            Webhook URL
+            <input id="webhookUrlInput" type="text" placeholder="https://hooks.slack.com/services/..." />
+          </label>
+          <div class="setup-actions">
+            <button id="saveWebhookButton" class="btn btn-small" type="button">Save</button>
+            <button id="testWebhookButton" class="btn btn-small" type="button">Test</button>
+          </div>
+
+          <h3 style="margin:8px 0 0;font-size:13px;">Email Digest</h3>
+          <label>
+            Email API URL
+            <input id="emailApiUrlInput" type="text" placeholder="https://api.sendgrid.com/v3/mail/send" />
+          </label>
+          <label>
+            Email API Key
+            <input id="emailApiKeyInput" type="password" placeholder="API key" autocomplete="off" />
+          </label>
+          <label>
+            Recipient
+            <input id="emailToInput" type="email" placeholder="you@example.com" />
+          </label>
+          <div class="setup-actions">
+            <button id="saveEmailButton" class="btn btn-small" type="button">Save Email</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- ═══ Identity Tab ═══ -->
+      <section class="settings-section settings-tab-panel" data-settings-tab="identity" hidden>
+        <h2 class="settings-section-title">Web Identity</h2>
+        <p class="hint">Give Geepus an identity it can use to sign up for services, create accounts, and retrieve API
+          keys on your behalf.</p>
+        <div class="setup-grid">
+          <label>
+            Email Address
+            <input id="identityEmailInput" type="email" placeholder="geepus-agent@example.com" autocomplete="off" />
+          </label>
+          <label>
+            Email Password <span class="hint">(so Geepus can check verification emails)</span>
+            <div class="key-row">
+              <input id="identityEmailPasswordInput" type="password" placeholder="Email account password"
+                autocomplete="off" />
+              <button id="toggleIdentityPasswordButton" class="btn btn-small" type="button">Show</button>
+            </div>
+          </label>
+          <label>
+            Verification Mode
+            <select id="identityEmailVerificationModeSelect">
+              <option value="webmail">Webmail UI automation</option>
+              <option value="resend">Resend inbox endpoint</option>
+            </select>
+          </label>
+          <label>
+            Resend Inbox Endpoint <span class="hint">(GET endpoint returning latest inbound email payload)</span>
+            <input id="identityResendInboxApiUrlInput" type="text" placeholder="https://your-worker.example.com/inbox/latest" autocomplete="off" />
+          </label>
+          <label>
+            Resend API Key <span class="hint">(optional bearer token for endpoint auth)</span>
+            <div class="key-row">
+              <input id="identityResendApiKeyInput" type="password" placeholder="re_..." autocomplete="off" />
+              <button id="toggleResendApiKeyButton" class="btn btn-small" type="button">Show</button>
+            </div>
+          </label>
+          <label>
+            Resend API Base URL <span class="hint">(used for built-in receiving API fallback)</span>
+            <input id="identityResendApiBaseUrlInput" type="text" placeholder="https://api.resend.com" autocomplete="off" />
+          </label>
+          <label>
+            Resend Sender Filter <span class="hint">(optional, e.g. no-reply@service.com)</span>
+            <input id="identityResendFromFilterInput" type="text" placeholder="no-reply@service.com" autocomplete="off" />
+          </label>
+          <label>
+            Display Name <span class="hint">(used during sign-ups)</span>
+            <input id="identityDisplayNameInput" type="text" placeholder="Geepus Agent" autocomplete="off" />
+          </label>
+          <label>
+            Username Preference <span class="hint">(stem — numbers added if taken)</span>
+            <input id="identityUsernameInput" type="text" placeholder="geepus-agent" autocomplete="off" />
+          </label>
+          <label>
+            Phone Number <span class="hint">(used when sites require contact details)</span>
+            <input id="identityPhoneInput" type="tel" placeholder="+1 555 123 4567" autocomplete="tel" />
+          </label>
+          <label>
+            Birthday <span class="hint">(used when sites require age verification)</span>
+            <input id="identityBirthDateInput" type="date" autocomplete="bday" />
+          </label>
+          <label class="voice-toggle">
+            <input id="identityStrongPasswordsToggle" type="checkbox" checked />
+            Generate strong passwords for new accounts
+          </label>
+          <div class="setup-actions">
+            <button id="saveIdentityButton" class="btn" type="button">Save Identity</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- ── Scheduled Tasks & Triggers ── -->
+      <section class="settings-section settings-tab-panel" data-settings-tab="automation">
+        <h2 class="settings-section-title">Scheduled Tasks &amp; Triggers</h2>
+
+        <div class="scheduler-section">
+          <div class="scheduler-head">
+            <h3>Scheduled Tasks</h3>
+            <button id="addScheduledTaskButton" class="btn btn-small" type="button">+ Task</button>
+          </div>
+          <div id="scheduledTaskList" class="scheduled-task-list"></div>
+        </div>
+
+        <div id="schedulerForm" class="scheduler-form" hidden>
+          <h4 id="schedulerFormTitle">New Scheduled Task</h4>
+          <input id="schedTaskNameInput" type="text" placeholder="Task name (e.g. Daily code review)" />
+          <textarea id="schedTaskObjectiveInput" rows="2" placeholder="Objective (what should Geepus do?)"></textarea>
+          <input id="schedTaskScheduleInput" type="text"
+            placeholder="Schedule: cron (0 9 * * 1-5) or interval (every 2h) — leave blank for Loop mode" />
+          <label class="sched-loop-label">
+            <input id="schedTaskLoopMode" type="checkbox" />
+            Loop mode — restart immediately after each run (great for overnight tasks)
+          </label>
+          <div id="schedTaskLoopDelayRow" class="sched-form-row" style="display:none;">
+            <label>
+              Cool-down between loops (seconds)
+              <input id="schedTaskLoopDelay" type="number" min="0" max="86400" value="0" style="width:90px;" />
+            </label>
+            <label>
+              Pause after N consecutive failures (0 = never)
+              <input id="schedTaskMaxFails" type="number" min="0" max="100" value="0" style="width:60px;" />
+            </label>
+          </div>
+          <input id="schedTaskWorkspaceInput" type="text"
+            placeholder="Workspace folder (optional, auto-find if blank)" />
+          <div class="sched-form-row">
+            <label>
+              Mode
+              <select id="schedTaskModeSelect">
+                <option value="action">Action</option>
+                <option value="research">Research</option>
+                <option value="auto">Auto</option>
+              </select>
+            </label>
+            <label>
+              Style
+              <select id="schedTaskTeamSelect">
+                <option value="teams">Team</option>
+                <option value="solo">Solo</option>
+              </select>
+            </label>
+          </div>
+          <div class="sched-form-actions">
+            <button id="schedTaskSaveButton" class="btn" type="button">Save Task</button>
+            <button id="schedTaskCancelButton" class="btn" type="button">Cancel</button>
+          </div>
+          <input id="schedTaskEditId" type="hidden" value="" />
+        </div>
+
+        <div class="scheduler-section">
+          <div class="scheduler-head">
+            <h3>File Triggers</h3>
+            <button id="addTriggerButton" class="btn btn-small" type="button">+ Trigger</button>
+          </div>
+          <div id="triggerList" class="trigger-list"></div>
+        </div>
+
+        <div id="triggerForm" class="trigger-form" hidden>
+          <h4 id="triggerFormTitle">New File Trigger</h4>
+          <input id="triggerNameInput" type="text" placeholder="Trigger name" />
+          <input id="triggerWatchPathInput" type="text" placeholder="Watch directory path" />
+          <input id="triggerPatternInput" type="text" placeholder="Filename pattern (e.g. *.md or **/*.js)" value="*" />
+          <label>
+            Task to fire
+            <select id="triggerTaskSelect"></select>
+          </label>
+          <div class="sched-form-actions">
+            <button id="triggerSaveButton" class="btn" type="button">Save Trigger</button>
+            <button id="triggerCancelButton" class="btn" type="button">Cancel</button>
+          </div>
+          <input id="triggerEditId" type="hidden" value="" />
+        </div>
+      </section>
+
+      <!-- ── Memory & Knowledge ── -->
+      <section class="settings-section settings-tab-panel" data-settings-tab="learning">
+        <h2 class="settings-section-title">Memory &amp; Knowledge</h2>
+
+        <div class="scheduler-section">
+          <div class="scheduler-head">
+            <h3>Semantic Search</h3>
+          </div>
+          <div class="sched-form-row">
+            <input id="memorySearchInput" type="text" placeholder="Search memory (e.g. 'deployment pipeline')..." />
+          </div>
+          <button id="memorySearchButton" class="btn btn-small" type="button">Search</button>
+          <div id="memorySearchResults" class="memory-results"></div>
+        </div>
+
+        <div class="scheduler-section">
+          <div class="scheduler-head">
+            <h3>Add Knowledge</h3>
+          </div>
+          <div class="sched-form-row">
+            <textarea id="memoryAddInput" rows="3"
+              placeholder="Add a text note or piece of knowledge to memory..."></textarea>
+          </div>
+          <button id="memoryAddButton" class="btn btn-small" type="button">Index into Memory</button>
+        </div>
+
+        <div class="scheduler-section">
+          <div class="scheduler-head">
+            <h3>Stats</h3>
+          </div>
+          <p id="memoryStatsText" class="sched-task-meta">Loading...</p>
+          <button id="memoryRefreshStatsButton" class="btn btn-small" type="button">Refresh</button>
+        </div>
+      </section>
+
+      <!-- ── Learning & Skills ── -->
+      <section class="settings-section settings-tab-panel" data-settings-tab="learning">
+        <h2 class="settings-section-title">Learning &amp; Skills</h2>
+
+        <div class="learning-directive-card">
+          <div class="learning-directive-banner"></div>
+          <textarea id="learningDirectivePreview" class="learning-directive-text" readonly></textarea>
+        </div>
+
+        <div class="learning-grid">
+          <label class="voice-toggle">
+            <input id="learningMemoryFlushToggle" type="checkbox" />
+            Enable <code>compaction.memoryFlush.enabled</code>
+          </label>
+          <label class="voice-toggle">
+            <input id="learningSessionMemoryToggle" type="checkbox" />
+            Enable <code>memorySearch.experimental.sessionMemory</code>
+          </label>
+          <label class="voice-toggle">
+            <input id="learningSourceMemoryToggle" type="checkbox" />
+            Include <code>memory</code> in memory search sources
+          </label>
+          <label class="voice-toggle">
+            <input id="learningSourceSessionsToggle" type="checkbox" />
+            Include <code>sessions</code> in memory search sources
+          </label>
+          <label class="voice-toggle">
+            <input id="learningAutoSkillReviewToggle" type="checkbox" />
+            Auto-review and update skill confidence after runs
+          </label>
+          <label>
+            Default location
+            <input id="learningDefaultLocationInput" type="text"
+              placeholder="City, State (used when location is omitted)" />
+          </label>
+        </div>
+
+        <div class="sched-form-row">
+          <label>
+            Learned strategies <span class="hint">(one per line)</span>
+            <textarea id="learningStrategiesInput" rows="5"
+              placeholder="For fresh factual questions, perform web search then synthesize."></textarea>
+          </label>
+        </div>
+
+        <div class="sched-form-row">
+          <label>
+            Learning notes <span class="hint">(global memory notes, one per line)</span>
+            <textarea id="learningGlobalNotesInput" rows="4"
+              placeholder="Notes Geepus should review before routing new tasks."></textarea>
+          </label>
+        </div>
+
+        <div class="setup-actions">
+          <button id="learningApplyButton" class="btn" type="button">Apply Learning Config</button>
+          <button id="learningRefreshButton" class="btn btn-small" type="button">Refresh</button>
+          <button id="learningResetSkillsButton" class="btn btn-small" type="button">Reset Skill Confidence</button>
+          <button id="learningResetStrategiesButton" class="btn btn-small" type="button">Reset Strategies</button>
+        </div>
+
+        <div class="scheduler-section">
+          <div class="scheduler-head">
+            <h3>Skill Confidence</h3>
+          </div>
+          <div id="learningSkillStatsList" class="learning-skill-list">
+            <p class="sched-empty">No learned skill stats yet.</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- ── What I Know ── -->
+      <section class="settings-section settings-tab-panel" data-settings-tab="learning">
+        <h2 class="settings-section-title">What I Know</h2>
+        <div class="viewer-toolbar">
+          <button id="knowledgeRefreshButton" class="btn btn-small" type="button">Refresh</button>
+        </div>
+        <div id="knowledgeViewerContent" class="viewer-content">
+          <p class="hint">Open this panel to see what Geepus remembers.</p>
+        </div>
+      </section>
+
+      <!-- ── Security Settings & Warnings ── -->
+      <section class="settings-section settings-tab-panel" data-settings-tab="security">
+        <h2 class="settings-section-title">Security Settings &amp; Warnings</h2>
+        <p class="hint">Pick how much freedom Geepus has, and for how long. You can turn these off anytime.</p>
+        <div class="security-controls-grid">
+          <div class="security-control-card">
+            <h3>Run sensitive actions without asking each time</h3>
+            <p class="security-control-detail">Use this when you want Geepus to run with fewer interruptions.</p>
+            <p class="security-control-warning">Possible consequence: Geepus may run a risky step you did not review
+              first.</p>
+            <div class="security-control-actions">
+              <select id="securityHighRiskDuration" class="security-duration-select">
+                <option value="15m">15 minutes</option>
+                <option value="1h">1 hour</option>
+                <option value="4h">4 hours</option>
+                <option value="24h">24 hours</option>
+                <option value="7d">7 days</option>
+              </select>
+              <button id="securityHighRiskAllowButton" class="btn btn-small" type="button">Allow</button>
+              <button id="securityHighRiskRevokeButton" class="btn btn-small" type="button">Turn Off</button>
+            </div>
+            <p id="securityHighRiskStatus" class="hint">Off</p>
+          </div>
+
+          <div class="security-control-card">
+            <h3>Let Geepus control the browser</h3>
+            <p class="security-control-detail">Needed for website testing, screenshots, and browser-based actions.</p>
+            <p class="security-control-warning">Possible consequence: Geepus may click or submit actions on websites.
+            </p>
+            <div class="security-control-actions">
+              <select id="securityBrowserDuration" class="security-duration-select">
+                <option value="15m">15 minutes</option>
+                <option value="1h">1 hour</option>
+                <option value="4h">4 hours</option>
+                <option value="24h">24 hours</option>
+                <option value="7d">7 days</option>
+              </select>
+              <button id="securityBrowserAllowButton" class="btn btn-small" type="button">Allow</button>
+              <button id="securityBrowserRevokeButton" class="btn btn-small" type="button">Turn Off</button>
+            </div>
+            <p id="securityBrowserStatus" class="hint">Off</p>
+          </div>
+
+          <div class="security-control-card">
+            <h3>Let Geepus use internet search and downloads</h3>
+            <p class="security-control-detail">Needed for web research, scraping, and downloading files.</p>
+            <p class="security-control-warning">Possible consequence: Geepus may pull external content you have not
+              reviewed yet.</p>
+            <div class="security-control-actions">
+              <select id="securityInternetDuration" class="security-duration-select">
+                <option value="15m">15 minutes</option>
+                <option value="1h">1 hour</option>
+                <option value="4h">4 hours</option>
+                <option value="24h">24 hours</option>
+                <option value="7d">7 days</option>
+              </select>
+              <button id="securityInternetAllowButton" class="btn btn-small" type="button">Allow</button>
+              <button id="securityInternetRevokeButton" class="btn btn-small" type="button">Turn Off</button>
+            </div>
+            <p id="securityInternetStatus" class="hint">Off</p>
+          </div>
+
+          <div class="security-control-card">
+            <h3>Let Geepus publish and connect to remote servers</h3>
+            <p class="security-control-detail">Needed for commands like <code>git push</code>, <code>ssh</code>,
+              <code>scp</code>, and <code>rsync</code>.
+            </p>
+            <p class="security-control-warning">Possible consequence: Geepus may publish code or connect to a remote
+              machine.</p>
+            <div class="security-control-actions">
+              <select id="securityRemoteDuration" class="security-duration-select">
+                <option value="15m">15 minutes</option>
+                <option value="1h">1 hour</option>
+                <option value="4h">4 hours</option>
+                <option value="24h">24 hours</option>
+                <option value="7d">7 days</option>
+              </select>
+              <button id="securityRemoteAllowButton" class="btn btn-small" type="button">Allow</button>
+              <button id="securityRemoteRevokeButton" class="btn btn-small" type="button">Turn Off</button>
+            </div>
+            <p id="securityRemoteStatus" class="hint">Off</p>
+          </div>
+        </div>
+        <div class="viewer-toolbar">
+          <button id="securityRefreshButton" class="btn btn-small" type="button">Refresh</button>
+        </div>
+        <div id="securityViewerContent" class="viewer-content">
+          <p class="hint">Open this panel to see Geepus's abilities and safety rules.</p>
+        </div>
+      </section>
+
+      <!-- ── Pipelines ── -->
+      <section class="settings-section settings-tab-panel" data-settings-tab="automation">
+        <h2 class="settings-section-title">Pipelines</h2>
+
+        <div class="scheduler-section">
+          <div class="scheduler-head">
+            <h3>Pipeline Templates</h3>
+            <button id="addPipelineButton" class="btn btn-small" type="button">+ Pipeline</button>
+          </div>
+          <div id="pipelineList" class="pipeline-list"></div>
+        </div>
+
+        <div id="pipelineForm" class="pipeline-form" hidden>
+          <h4 id="pipelineFormTitle">New Pipeline</h4>
+          <div class="sched-form-row">
+            <input id="pipelineNameInput" type="text" placeholder="Pipeline name (e.g. Release workflow)" />
+          </div>
+          <div class="sched-form-row">
+            <input id="pipelineDescInput" type="text" placeholder="Description (optional)" />
+          </div>
+          <div id="pipelineStepsContainer" class="pipeline-steps-container"></div>
+          <button id="pipelineAddStepButton" class="btn btn-small" type="button">+ Add Step</button>
+          <div class="sched-form-actions">
+            <button id="pipelineSaveButton" class="btn" type="button">Save Pipeline</button>
+            <button id="pipelineCancelButton" class="btn" type="button">Cancel</button>
+          </div>
+          <input id="pipelineEditId" type="hidden" value="" />
+        </div>
+
+        <div class="scheduler-section">
+          <div class="scheduler-head">
+            <h3>Pipeline Runs</h3>
+            <button id="refreshPipelineRunsButton" class="btn btn-small" type="button">Refresh</button>
+          </div>
+          <div id="pipelineRunList" class="pipeline-run-list"></div>
+        </div>
+      </section>
+
+      <!-- ── Project Manager ── -->
+      <section class="settings-section settings-tab-panel" data-settings-tab="operations">
+        <h2 class="settings-section-title">Session Controls</h2>
+
+        <section id="quickSetupCard" class="setup-wizard compact-section">
+          <p class="wizard-hint">Connect a model and finish setup.</p>
+          <p id="setupProgress" class="wizard-progress">Step 1 of 3</p>
+          <div class="step-card">
+            <div class="step-head">
+              <span id="stepKeyStatus" class="step-pill">Not ready</span>
+              <span id="stepModelStatus" class="step-pill" style="margin-left:4px">Not ready</span>
+              <span id="stepProjectStatus" class="step-pill" style="margin-left:4px">Auto-find</span>
+            </div>
+            <div class="setup-actions">
+              <button id="openSettingsFromSetup" class="btn btn-small" type="button">Open Core Settings</button>
+            </div>
+          </div>
+        </section>
+
+        <div class="compact-section">
+          <p id="runMeta" class="run-meta">No active run</p>
+          <div class="sidebar-actions">
+            <button id="watchTaskButton" class="btn btn-small" type="button">Watch Task</button>
+            <button id="resumeRunButton" class="btn btn-small" type="button">Resume Last</button>
+            <button id="refreshRunsButton" class="btn btn-small" type="button">Refresh Runs</button>
+          </div>
+          <button id="showSetupButton" class="btn btn-ghost" type="button" hidden>Show setup options</button>
+        </div>
+      </section>
+
+      <section class="settings-section settings-tab-panel" data-settings-tab="operations">
+        <h2 class="settings-section-title">Project Manager</h2>
+        <div class="proj-manager-head">
+          <button id="projectRefreshButton" class="btn btn-small" type="button">Refresh</button>
+        </div>
+        <div id="projectManagerContent" class="proj-manager-content">
+          <p class="hint">Open this panel to load projects.</p>
+        </div>
+        <div class="proj-add-bar">
+          <input id="addProjectPathInput" type="text" placeholder="/path/to/project folder" />
+          <button id="addProjectButton" class="btn btn-small" type="button">Add</button>
+        </div>
+      </section>
+
+      <!-- ── Cost Dashboard ── -->
+      <section class="settings-section settings-tab-panel" data-settings-tab="operations">
+        <h2 class="settings-section-title">Cost Dashboard</h2>
+        <div class="cost-dashboard-head">
+          <button id="costRefreshButton" class="btn btn-small" type="button">Refresh</button>
+        </div>
+        <div id="costDashboardContent" class="cost-dashboard-content">
+          <p class="hint">Open this panel to load cost data.</p>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <script src="renderer-state.js"></script>
+  <script src="renderer-utils.js"></script>
+  <script src="renderer-voice.js"></script>
+  <script src="renderer-markdown.js"></script>
+  <script src="renderer-intent.js"></script>
+  <script src="renderer-threads.js"></script>
+  <script src="renderer-chat.js"></script>
+  <script src="renderer-settings.js"></script>
+  <script src="renderer-workflow.js"></script>
+  <script src="renderer-actions.js"></script>
+  <script src="renderer-scheduler.js"></script>
+  <script src="renderer-memory.js"></script>
+  <script src="renderer-learning.js"></script>
+  <script src="renderer-viewers.js"></script>
+  <script src="renderer-pipelines.js"></script>
+  <script src="renderer-costs.js"></script>
+  <script src="renderer-projects.js"></script>
+  <script src="renderer-local-models.js"></script>
+  <script src="renderer.js"></script>
+</body>
+
+</html>

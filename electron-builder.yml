@@ -1,0 +1,17 @@
+appId: com.geoffbaron.geepus
+productName: Geepus
+directories:
+  output: release
+  buildResources: resources
+files:
+  - out/**/*
+  - package.json
+mac:
+  target: dmg
+  category: public.app-category.productivity
+  hardenedRuntime: true
+  # No signing identity configured yet — dev builds are unsigned.
+  # Fill in identity + notarize once Geoff's Developer ID is available (PLAN.md §12, M7).
+  identity: null
+dmg:
+  title: Geepus ${version}

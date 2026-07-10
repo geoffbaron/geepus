@@ -1,0 +1,24 @@
+{
+  "name": "geepus-desktop",
+  "version": "0.2.77",
+  "description": "Geepus local desktop assistant",
+  "main": "src/main.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron .",
+    "test:all": "node web-game/test-playwright.js && npm run test:browser-use && node test-smoke.js",
+    "test:smoke": "node test-smoke.js",
+    "test:browser-use": "node test-browser-e2e.js && node test-browser-session.js && node test-extension-content.js && node test-extension-bridge.js && node test-browser-controller-registry.js",
+    "test:web-game": "node web-game/test-playwright.js"
+  },
+  "devDependencies": {
+    "electron": "31.7.7",
+    "electron-packager": "^17.1.2"
+  },
+  "dependencies": {
+    "playwright": "^1.58.2",
+    "turndown": "^7.2.2",
+    "ws": "^8.19.0"
+  }
+}

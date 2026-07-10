@@ -1,0 +1,29 @@
+:root {
+  color-scheme: light dark;
+  font-family:
+    -apple-system,
+    BlinkMacSystemFont,
+    'Segoe UI',
+    sans-serif;
+}
+
+body {
+  margin: 0;
+  background: canvas;
+  color: canvastext;
+}
+
+.shell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100vh;
+  gap: 0.5rem;
+  text-align: center;
+}
+
+.version {
+  opacity: 0.6;
+  font-size: 0.85rem;
+}

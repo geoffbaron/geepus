@@ -1,0 +1,2082 @@
+const state = {
+  apiKeyPresent: false,
+  setupComplete: false,
+  interactionMode: 'planning',
+  provider: 'openai',
+  teamMode: 'teams',
+  baseUrl: 'https://api.openai.com/v1',
+  models: [],
+  model: '',
+  workspaceRoot: '',
+  runs: [],
+  threads: [],
+  currentThreadId: '',
+  threadQuery: '',
+  transientResponse: null,
+  working: false,
+  currentRunId: '',
+  runPollTimer: null,
+  showSetupPanels: false,
+  runLimits: {
+    maxIterations: 12,
+    maxRuntimeMinutes: 15,
+    maxActions: 120,
+    maxModelCallsPerMinute: 12,
+    maxToolCallsPerMinute: 24,
+    idleTimeoutSeconds: 120,
+    consecutiveDriftLimit: 2,
+  },
+};
+
+const INTERACTION_MODES = {
+  planning: {
+    buttonLabel: 'Plan with Geepus',
+    description: 'Planning Mode: Geepus helps you shape the plan. No actions are run.',
+    status: 'Planning Mode enabled. Collaborate on the plan first.',
+  },
+  research: {
+    buttonLabel: 'Start Research',
+    description: 'Research Mode: Geepus runs research actions only (web + notes), with no coding/building.',
+    status: 'Research Mode enabled. Click Start Research to run safe research tasks.',
+  },
+  action: {
+    buttonLabel: 'Start Task',
+    description: 'Action Mode: Geepus executes the full task loop for build, implementation, and QA.',
+    status: 'Action Mode enabled. Click Start Task when ready to execute.',
+  },
+};
+
+const DEFAULT_RUN_LIMITS = {
+  maxIterations: 12,
+  maxRuntimeMinutes: 15,
+  maxActions: 120,
+  maxModelCallsPerMinute: 12,
+  maxToolCallsPerMinute: 24,
+  idleTimeoutSeconds: 120,
+  consecutiveDriftLimit: 2,
+};
+
+const THREADS_STORAGE_KEY = 'geepus_chat_threads_v1';
+const CURRENT_THREAD_STORAGE_KEY = 'geepus_current_thread_v1';
+let runLimitsSaveTimer = null;
+
+const el = {
+  quickSetupCard: document.getElementById('quickSetupCard'),
+  advancedSettingsCard: document.getElementById('advancedSettingsCard'),
+  showSetupButton: document.getElementById('showSetupButton'),
+  connectionBadge: document.getElementById('connectionBadge'),
+  promptInput: document.getElementById('promptInput'),
+  askButton: document.getElementById('askButton'),
+  planningModeButton: document.getElementById('planningModeButton'),
+  researchModeButton: document.getElementById('researchModeButton'),
+  actionModeButton: document.getElementById('actionModeButton'),
+  modeDescription: document.getElementById('modeDescription'),
+  modelQuickSelect: document.getElementById('modelQuickSelect'),
+  refreshModelsInlineButton: document.getElementById('refreshModelsInlineButton'),
+  clearPromptButton: document.getElementById('clearPromptButton'),
+  stopTaskButton: document.getElementById('stopTaskButton'),
+  responseOutput: document.getElementById('responseOutput'),
+  responseModel: document.getElementById('responseModel'),
+  runMeta: document.getElementById('runMeta'),
+  setupProgress: document.getElementById('setupProgress'),
+  stepKeyStatus: document.getElementById('stepKeyStatus'),
+  stepModelStatus: document.getElementById('stepModelStatus'),
+  stepProjectStatus: document.getElementById('stepProjectStatus'),
+  refreshRunsButton: document.getElementById('refreshRunsButton'),
+  resumeRunButton: document.getElementById('resumeRunButton'),
+  watchTaskButton: document.getElementById('watchTaskButton'),
+  openSettingsButton: document.getElementById('openSettingsButton'),
+  newThreadButton: document.getElementById('newThreadButton'),
+  threadSearchInput: document.getElementById('threadSearchInput'),
+  threadList: document.getElementById('threadList'),
+  plannerLane: document.getElementById('plannerLane'),
+  builderLane: document.getElementById('builderLane'),
+  reviewerLane: document.getElementById('reviewerLane'),
+  checkpointList: document.getElementById('checkpointList'),
+  providerSelect: document.getElementById('providerSelect'),
+  teamModeSelect: document.getElementById('teamModeSelect'),
+  baseUrlInput: document.getElementById('baseUrlInput'),
+  limitMaxRuntimeMinutes: document.getElementById('limitMaxRuntimeMinutes'),
+  limitMaxIterations: document.getElementById('limitMaxIterations'),
+  limitMaxActions: document.getElementById('limitMaxActions'),
+  limitMaxModelCallsPerMinute: document.getElementById('limitMaxModelCallsPerMinute'),
+  limitMaxToolCallsPerMinute: document.getElementById('limitMaxToolCallsPerMinute'),
+  limitIdleTimeoutSeconds: document.getElementById('limitIdleTimeoutSeconds'),
+  limitConsecutiveDriftLimit: document.getElementById('limitConsecutiveDriftLimit'),
+  modelSelect: document.getElementById('modelSelect'),
+  workspaceRootInput: document.getElementById('workspaceRootInput'),
+  useAutoFindButton: document.getElementById('useAutoFindButton'),
+  apiKeyInput: document.getElementById('apiKeyInput'),
+  toggleKeyButton: document.getElementById('toggleKeyButton'),
+  saveKeyButton: document.getElementById('saveKeyButton'),
+  clearKeyButton: document.getElementById('clearKeyButton'),
+  listModelsButton: document.getElementById('listModelsButton'),
+  testButton: document.getElementById('testButton'),
+  restartButton: document.getElementById('restartButton'),
+  statusLine: document.getElementById('statusLine'),
+};
+
+function setStatus(message) {
+  el.statusLine.textContent = message;
+}
+
+function normalizeRunLimits(raw) {
+  const next = raw && typeof raw === 'object' ? raw : {};
+  const value = (key) => Number(next[key] ?? DEFAULT_RUN_LIMITS[key]);
+  const clamp = (num, min, max, fallback) => {
+    if (!Number.isFinite(num)) return fallback;
+    return Math.max(min, Math.min(max, Math.floor(num)));
+  };
+  return {
+    maxIterations: clamp(value('maxIterations'), 1, 120, DEFAULT_RUN_LIMITS.maxIterations),
+    maxRuntimeMinutes: clamp(value('maxRuntimeMinutes'), 1, 720, DEFAULT_RUN_LIMITS.maxRuntimeMinutes),
+    maxActions: clamp(value('maxActions'), 1, 4000, DEFAULT_RUN_LIMITS.maxActions),
+    maxModelCallsPerMinute: clamp(value('maxModelCallsPerMinute'), 1, 240, DEFAULT_RUN_LIMITS.maxModelCallsPerMinute),
+    maxToolCallsPerMinute: clamp(value('maxToolCallsPerMinute'), 1, 480, DEFAULT_RUN_LIMITS.maxToolCallsPerMinute),
+    idleTimeoutSeconds: clamp(value('idleTimeoutSeconds'), 30, 1800, DEFAULT_RUN_LIMITS.idleTimeoutSeconds),
+    consecutiveDriftLimit: clamp(value('consecutiveDriftLimit'), 1, 20, DEFAULT_RUN_LIMITS.consecutiveDriftLimit),
+  };
+}
+
+function applyRunLimitsToInputs(limits) {
+  const next = normalizeRunLimits(limits);
+  state.runLimits = next;
+  el.limitMaxRuntimeMinutes.value = String(next.maxRuntimeMinutes);
+  el.limitMaxIterations.value = String(next.maxIterations);
+  el.limitMaxActions.value = String(next.maxActions);
+  el.limitMaxModelCallsPerMinute.value = String(next.maxModelCallsPerMinute);
+  el.limitMaxToolCallsPerMinute.value = String(next.maxToolCallsPerMinute);
+  el.limitIdleTimeoutSeconds.value = String(next.idleTimeoutSeconds);
+  el.limitConsecutiveDriftLimit.value = String(next.consecutiveDriftLimit);
+}
+
+function readRunLimitsFromInputs() {
+  return normalizeRunLimits({
+    maxRuntimeMinutes: el.limitMaxRuntimeMinutes.value,
+    maxIterations: el.limitMaxIterations.value,
+    maxActions: el.limitMaxActions.value,
+    maxModelCallsPerMinute: el.limitMaxModelCallsPerMinute.value,
+    maxToolCallsPerMinute: el.limitMaxToolCallsPerMinute.value,
+    idleTimeoutSeconds: el.limitIdleTimeoutSeconds.value,
+    consecutiveDriftLimit: el.limitConsecutiveDriftLimit.value,
+  });
+}
+
+function isLikelyExecutionIntent(prompt) {
+  const text = String(prompt || '').trim().toLowerCase();
+  if (!text) return false;
+  const hardRun = [
+    'start task',
+    'start research',
+    'run this',
+    'execute',
+    'go ahead',
+    'please proceed',
+    'continue task',
+    'resume run',
+  ];
+  if (hardRun.some((token) => text.includes(token))) {
+    return true;
+  }
+  const actionVerbs = [
+    'build',
+    'create',
+    'research',
+    'analyze',
+    'implement',
+    'fix',
+    'generate',
+    'write',
+    'investigate',
+    'test',
+    'send',
+    'email',
+    'open',
+    'book',
+    'schedule',
+    'draft',
+  ];
+  return actionVerbs.some((token) => text.includes(`${token} `) || text.endsWith(token));
+}
+
+function isLikelySimpleFollowUp(prompt) {
+  const text = String(prompt || '').trim().toLowerCase();
+  if (!text) return false;
+  if (isLikelyExecutionIntent(text)) return false;
+  const questionLead = /^(where|what|why|how|which|who|did|is|are|can|could|would|should|i don't|i dont|i can't|i cant|show|open)\b/;
+  if (questionLead.test(text)) return true;
+  if (text.includes('?') && text.length <= 260) return true;
+  if (/\b(report|file|path|saved|created|where is|can't find|cant find|don't see|dont see)\b/.test(text)) return true;
+  return text.length <= 140;
+}
+
+function isReportLookupPrompt(prompt) {
+  const text = String(prompt || '').trim().toLowerCase();
+  return /\b(report|file|path|saved|created|where is|can't find|cant find|don't see|dont see)\b/.test(text);
+}
+
+function shortText(value, max = 280) {
+  const text = String(value || '').trim().replace(/\s+/g, ' ');
+  if (!text) return '';
+  if (text.length <= max) return text;
+  return `${text.slice(0, Math.max(1, max - 3))}...`;
+}
+
+function recentThreadMessagesForLLM(thread, limit = 14) {
+  const messages = thread && Array.isArray(thread.messages) ? thread.messages : [];
+  return messages
+    .filter((message) => message && typeof message === 'object')
+    .filter((message) => (message.role === 'user' || message.role === 'assistant'))
+    .filter((message) => message.technical !== true)
+    .map((message) => ({
+      role: message.role === 'assistant' ? 'assistant' : 'user',
+      content: String(message.content || '').trim(),
+    }))
+    .filter((message) => message.content)
+    .slice(-Math.max(1, limit));
+}
+
+function isContinuationPrompt(prompt) {
+  const text = String(prompt || '').trim().toLowerCase();
+  if (!text || isReportLookupPrompt(text)) return false;
+  if (isLikelyExecutionIntent(text)) return false;
+  const exact = new Set([
+    'proceed',
+    'continue',
+    'go ahead',
+    'do it',
+    'run it',
+    'start',
+    'yes',
+    'y',
+    'ok',
+    'okay',
+    'sure',
+    'sounds good',
+    'please proceed',
+  ]);
+  if (exact.has(text)) return true;
+  return (
+    /^i(?:'m| am)\s+in\s+(?:action|research)\s+mode\b/.test(text)
+    || /^continue\b/.test(text)
+    || /^proceed\b/.test(text)
+    || /^go ahead\b/.test(text)
+    || /^yes\b/.test(text)
+    || /^ok(?:ay)?\b/.test(text)
+  );
+}
+
+function inferPriorUserObjective(thread, latestPrompt = '') {
+  const skip = String(latestPrompt || '').trim().toLowerCase();
+  const messages = thread && Array.isArray(thread.messages) ? thread.messages : [];
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (!message || message.role !== 'user') continue;
+    const content = String(message.content || '').trim();
+    if (!content) continue;
+    const lower = content.toLowerCase();
+    if (skip && lower === skip) continue;
+    if (isContinuationPrompt(content)) continue;
+    if (isReportLookupPrompt(content)) continue;
+    return content;
+  }
+  const threadObjective = String((thread && thread.objective) || '').trim();
+  return threadObjective || '';
+}
+
+function resolveExecutionTaskPrompt(thread, prompt) {
+  const raw = String(prompt || '').trim();
+  if (!raw) return '';
+  if (!isContinuationPrompt(raw)) {
+    return raw;
+  }
+  const priorObjective = inferPriorUserObjective(thread, raw);
+  if (!priorObjective) {
+    return raw;
+  }
+  const lower = raw.toLowerCase();
+  const pureContinue = (
+    lower === 'proceed'
+    || lower === 'continue'
+    || lower === 'go ahead'
+    || lower === 'do it'
+    || lower === 'run it'
+    || lower === 'please proceed'
+    || lower === 'yes'
+    || lower === 'ok'
+    || lower === 'okay'
+    || /^i(?:'m| am)\s+in\s+(?:action|research)\s+mode\b/.test(lower)
+  );
+  if (pureContinue) {
+    return priorObjective;
+  }
+  return `${priorObjective}\n\nAdditional user direction: ${raw}`;
+}
+
+function buildThreadContextSnippet(thread, latestPrompt = '', limit = 10) {
+  const skip = String(latestPrompt || '').trim().toLowerCase();
+  const history = recentThreadMessagesForLLM(thread, limit)
+    .filter((item) => !(item.role === 'user' && item.content.toLowerCase() === skip));
+  if (history.length === 0) {
+    return '';
+  }
+  return history
+    .map((item) => `${item.role === 'assistant' ? 'Geepus' : 'User'}: ${shortText(item.content, 220)}`)
+    .join('\n');
+}
+
+async function answerFromRecentArtifacts(prompt) {
+  if (!isReportLookupPrompt(prompt)) {
+    return false;
+  }
+  const artifacts = await window.geepus.listRecentArtifacts({ limit: 20 });
+  if (!Array.isArray(artifacts) || artifacts.length === 0) {
+    setResponse('I could not find any verified report files from recent runs.');
+    setStatus('No verified report files found.');
+    return true;
+  }
+  const lines = [
+    'Here are the verified report files I found from recent runs:',
+    ...artifacts.slice(0, 10).map((item) => `- ${item.path}`),
+    '',
+    'If you want, I can keep using these files without starting a new run.',
+  ];
+  setResponse(lines.join('\n'));
+  setStatus('Showing verified report file paths from recent runs.');
+  return true;
+}
+
+function scheduleRunLimitsSave() {
+  state.runLimits = readRunLimitsFromInputs();
+  if (runLimitsSaveTimer) {
+    window.clearTimeout(runLimitsSaveTimer);
+    runLimitsSaveTimer = null;
+  }
+  runLimitsSaveTimer = window.setTimeout(async () => {
+    try {
+      await saveSettingsPatch({ runLimits: state.runLimits });
+      setStatus('Run limits updated.');
+    } catch (error) {
+      setStatus(error.message || String(error));
+    } finally {
+      runLimitsSaveTimer = null;
+    }
+  }, 200);
+}
+
+function escapeHtml(value) {
+  return String(value || '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
+}
+
+function formatInlineMarkdown(line) {
+  let safe = escapeHtml(line);
+  safe = safe.replace(/`([^`]+)`/g, '<span class="inline-code">$1</span>');
+  safe = safe.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  return safe;
+}
+
+function formatFriendlyText(text) {
+  const lines = String(text || '').split('\n');
+  const blocks = [];
+  let paragraph = [];
+  let listItems = [];
+
+  const flushParagraph = () => {
+    if (paragraph.length === 0) return;
+    blocks.push(`<p>${paragraph.map((line) => formatInlineMarkdown(line)).join('<br>')}</p>`);
+    paragraph = [];
+  };
+
+  const flushList = () => {
+    if (listItems.length === 0) return;
+    blocks.push(`<ul>${listItems.map((item) => `<li>${formatInlineMarkdown(item)}</li>`).join('')}</ul>`);
+    listItems = [];
+  };
+
+  lines.forEach((line) => {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      flushParagraph();
+      flushList();
+      return;
+    }
+    if (/^[-*•–]\s+/.test(trimmed)) {
+      flushParagraph();
+      listItems.push(trimmed.replace(/^[-*•–]\s+/, '').trim());
+      return;
+    }
+    if (/^\d+\.\s+/.test(trimmed)) {
+      flushParagraph();
+      listItems.push(trimmed.replace(/^\d+\.\s+/, '').trim());
+      return;
+    }
+    if (/^\*\*[^*]+\*\*$/.test(trimmed)) {
+      flushParagraph();
+      flushList();
+      blocks.push(`<h3>${formatInlineMarkdown(trimmed.slice(2, -2))}</h3>`);
+      return;
+    }
+    flushList();
+    paragraph.push(trimmed);
+  });
+
+  flushParagraph();
+  flushList();
+
+  if (blocks.length === 0) {
+    return '<p>No response yet.</p>';
+  }
+  return blocks.join('');
+}
+
+function makeId(prefix = 'id') {
+  return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function normalizeThread(raw) {
+  const thread = raw && typeof raw === 'object' ? raw : {};
+  const messages = Array.isArray(thread.messages) ? thread.messages : [];
+  return {
+    id: String(thread.id || makeId('thread')),
+    runKey: String(thread.runKey || ''),
+    title: String(thread.title || 'New Thread'),
+    objective: String(thread.objective || ''),
+    workspaceRoot: String(thread.workspaceRoot || ''),
+    latestRunId: String(thread.latestRunId || ''),
+    latestState: String(thread.latestState || ''),
+    latestReason: String(thread.latestReason || ''),
+    latestUpdatedAt: thread.latestUpdatedAt || null,
+    runCount: Number.isFinite(Number(thread.runCount)) ? Number(thread.runCount) : 0,
+    resumeRunId: String(thread.resumeRunId || ''),
+    messages: messages
+      .filter((message) => message && typeof message === 'object')
+      .map((message) => ({
+        id: String(message.id || makeId('msg')),
+        role: String(message.role || 'assistant'),
+        content: String(message.content || ''),
+        technical: message.technical === true,
+        ts: message.ts || new Date().toISOString(),
+      })),
+    createdAt: thread.createdAt || new Date().toISOString(),
+    updatedAt: thread.updatedAt || new Date().toISOString(),
+  };
+}
+
+function saveThreadsToStorage() {
+  try {
+    const payload = state.threads.map((thread) => ({
+      ...thread,
+      messages: thread.messages.slice(-400),
+    }));
+    window.localStorage.setItem(THREADS_STORAGE_KEY, JSON.stringify(payload));
+    window.localStorage.setItem(CURRENT_THREAD_STORAGE_KEY, state.currentThreadId || '');
+  } catch {
+    // Ignore storage issues.
+  }
+}
+
+function loadThreadsFromStorage() {
+  try {
+    const raw = window.localStorage.getItem(THREADS_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    state.threads = Array.isArray(parsed) ? parsed.map(normalizeThread) : [];
+    const savedCurrent = String(window.localStorage.getItem(CURRENT_THREAD_STORAGE_KEY) || '').trim();
+    if (savedCurrent && state.threads.some((thread) => thread.id === savedCurrent)) {
+      state.currentThreadId = savedCurrent;
+    }
+  } catch {
+    state.threads = [];
+  }
+}
+
+function createNewThread({ title = 'New Thread', objective = '', workspaceRoot = '' } = {}) {
+  const now = new Date().toISOString();
+  const thread = normalizeThread({
+    id: makeId('thread'),
+    title,
+    objective,
+    workspaceRoot,
+    messages: [],
+    createdAt: now,
+    updatedAt: now,
+  });
+  state.threads.unshift(thread);
+  state.currentThreadId = thread.id;
+  state.threadQuery = '';
+  if (el.threadSearchInput) {
+    el.threadSearchInput.value = '';
+  }
+  state.transientResponse = null;
+  saveThreadsToStorage();
+  renderThreads();
+  renderCurrentThread();
+  return thread;
+}
+
+function currentThread() {
+  return state.threads.find((thread) => thread.id === state.currentThreadId) || null;
+}
+
+function ensureCurrentThread() {
+  let thread = currentThread();
+  if (thread) {
+    return thread;
+  }
+  if (state.threads.length === 0) {
+    thread = createNewThread();
+  } else {
+    thread = state.threads[0];
+    state.currentThreadId = thread.id;
+  }
+  saveThreadsToStorage();
+  return thread;
+}
+
+function selectThread(threadId) {
+  const target = state.threads.find((thread) => thread.id === threadId);
+  if (!target) {
+    return;
+  }
+  state.currentThreadId = target.id;
+  state.transientResponse = null;
+  saveThreadsToStorage();
+  renderThreads();
+  renderCurrentThread();
+}
+
+function updateCurrentThreadTitleFromMessage(thread, content) {
+  if (!thread) return;
+  const candidate = threadTitle(content);
+  if (!thread.title || thread.title === 'New Thread' || thread.title === 'Untitled task') {
+    thread.title = candidate;
+  }
+  if (!thread.objective) {
+    thread.objective = String(content || '').trim();
+  }
+}
+
+function appendMessageToCurrentThread(role, content, { technical = false } = {}) {
+  const thread = ensureCurrentThread();
+  const trimmed = String(content || '').trim();
+  if (!trimmed) {
+    return;
+  }
+  thread.messages.push({
+    id: makeId('msg'),
+    role: String(role || 'assistant'),
+    content: trimmed,
+    technical,
+    ts: new Date().toISOString(),
+  });
+  if (role === 'user') {
+    updateCurrentThreadTitleFromMessage(thread, trimmed);
+  }
+  thread.updatedAt = new Date().toISOString();
+  saveThreadsToStorage();
+  renderThreads();
+  renderCurrentThread();
+}
+
+function formatMessageBody(message) {
+  if (message.technical) {
+    return `<pre class="tech-block">${escapeHtml(message.content)}</pre>`;
+  }
+  return formatFriendlyText(message.content);
+}
+
+function renderCurrentThread() {
+  const thread = ensureCurrentThread();
+  if (!thread || !el.responseOutput) {
+    return;
+  }
+
+  const messages = Array.isArray(thread.messages) ? thread.messages : [];
+  if (messages.length === 0 && !state.transientResponse) {
+    el.responseOutput.innerHTML = '<p>No messages yet. Ask Geepus to start this thread.</p>';
+    return;
+  }
+
+  const blocks = messages.map((message) => {
+    const role = message.role === 'user' ? 'You' : (message.role === 'system' ? 'System' : 'Geepus');
+    const cls = message.role === 'user' ? 'user' : (message.role === 'system' ? 'system' : 'assistant');
+    return [
+      `<article class="chat-msg ${cls}">`,
+      `<header class="chat-msg-head"><span>${escapeHtml(role)}</span><time>${escapeHtml(formatRelativeTime(message.ts))}</time></header>`,
+      `<div class="chat-msg-body">${formatMessageBody(message)}</div>`,
+      '</article>',
+    ].join('');
+  });
+
+  if (state.transientResponse) {
+    blocks.push([
+      '<article class="chat-msg system pending">',
+      '<header class="chat-msg-head"><span>Geepus</span><time>now</time></header>',
+      `<div class="chat-msg-body">${state.transientResponse.technical
+        ? `<pre class="tech-block">${escapeHtml(state.transientResponse.content)}</pre>`
+        : formatFriendlyText(state.transientResponse.content)}</div>`,
+      '</article>',
+    ].join(''));
+  }
+
+  el.responseOutput.innerHTML = blocks.join('');
+  el.responseOutput.scrollTop = el.responseOutput.scrollHeight;
+}
+
+function setResponse(content, { technical = false, persist = true } = {}) {
+  if (!persist) {
+    state.transientResponse = {
+      content: String(content || ''),
+      technical,
+    };
+    renderCurrentThread();
+    return;
+  }
+  state.transientResponse = null;
+  appendMessageToCurrentThread('assistant', content, { technical });
+}
+
+function updateSetupPanelVisibility(setupComplete) {
+  const showSetup = !setupComplete || state.showSetupPanels;
+
+  if (el.quickSetupCard) {
+    el.quickSetupCard.hidden = !showSetup;
+  }
+  if (el.advancedSettingsCard) {
+    el.advancedSettingsCard.hidden = false;
+  }
+  if (el.showSetupButton) {
+    el.showSetupButton.hidden = !setupComplete;
+    el.showSetupButton.textContent = showSetup ? 'Hide setup assistant' : 'Show setup assistant';
+  }
+}
+
+function openSettingsPanel() {
+  state.showSetupPanels = true;
+  updateSetupWizard();
+  if (el.advancedSettingsCard) {
+    el.advancedSettingsCard.open = true;
+  }
+  setStatus('Settings opened. You can change model and provider here.');
+  if (el.modelQuickSelect && !el.modelQuickSelect.disabled) {
+    el.modelQuickSelect.focus({ preventScroll: true });
+    return;
+  }
+  if (el.modelSelect && !el.modelSelect.disabled) {
+    el.modelSelect.focus({ preventScroll: true });
+  }
+}
+
+function setBusy(isBusy) {
+  state.working = isBusy;
+
+  el.askButton.disabled = isBusy;
+  el.refreshRunsButton.disabled = isBusy;
+  el.resumeRunButton.disabled = isBusy;
+  el.watchTaskButton.disabled = false;
+  el.openSettingsButton.disabled = isBusy;
+  el.listModelsButton.disabled = isBusy;
+  el.refreshModelsInlineButton.disabled = isBusy;
+  el.testButton.disabled = isBusy;
+  el.providerSelect.disabled = isBusy;
+  el.teamModeSelect.disabled = isBusy;
+  el.modelQuickSelect.disabled = isBusy;
+  el.limitMaxRuntimeMinutes.disabled = isBusy;
+  el.limitMaxIterations.disabled = isBusy;
+  el.limitMaxActions.disabled = isBusy;
+  el.limitMaxModelCallsPerMinute.disabled = isBusy;
+  el.limitMaxToolCallsPerMinute.disabled = isBusy;
+  el.limitIdleTimeoutSeconds.disabled = isBusy;
+  el.limitConsecutiveDriftLimit.disabled = isBusy;
+  el.useAutoFindButton.disabled = isBusy;
+  el.planningModeButton.disabled = isBusy;
+  el.researchModeButton.disabled = isBusy;
+  el.actionModeButton.disabled = isBusy;
+  updateStopButton();
+  updateSetupWizard();
+  renderThreads();
+}
+
+function updateStopButton() {
+  const canStop = state.working || Boolean(state.currentRunId);
+  el.stopTaskButton.disabled = !canStop;
+}
+
+function updateConnectionBadge() {
+  if (state.apiKeyPresent) {
+    el.connectionBadge.textContent = 'Connected';
+    el.connectionBadge.classList.remove('badge-warn');
+    el.connectionBadge.classList.add('badge-ok');
+  } else {
+    el.connectionBadge.textContent = 'Not connected';
+    el.connectionBadge.classList.remove('badge-ok');
+    el.connectionBadge.classList.add('badge-warn');
+  }
+}
+
+function setStepPill(node, ready, text) {
+  node.textContent = text;
+  node.classList.remove('ready', 'pending');
+  node.classList.add(ready ? 'ready' : 'pending');
+}
+
+function updateSetupWizard() {
+  const keyReady = state.apiKeyPresent;
+  const modelReady = keyReady && Boolean(state.model);
+  const setupComplete = keyReady;
+  const projectCustom = Boolean((state.workspaceRoot || '').trim());
+
+  if (setupComplete && !state.setupComplete) {
+    state.showSetupPanels = false;
+  }
+  state.setupComplete = setupComplete;
+
+  setStepPill(el.stepKeyStatus, keyReady, keyReady ? 'Done' : 'Not ready');
+  setStepPill(el.stepModelStatus, modelReady, modelReady ? 'Done' : 'Not ready');
+  setStepPill(el.stepProjectStatus, true, projectCustom ? 'Custom folder' : 'Auto-find');
+
+  if (!keyReady) {
+    el.setupProgress.textContent = 'Step 1 of 3';
+  } else if (!modelReady) {
+    el.setupProgress.textContent = 'Connected (model can be auto-selected)';
+  } else {
+    el.setupProgress.textContent = projectCustom ? 'Setup complete' : 'Ready (Auto-find enabled)';
+  }
+  updateSetupPanelVisibility(setupComplete);
+  if (!state.working) {
+    el.askButton.disabled = !keyReady;
+  }
+}
+
+function setInteractionMode(mode) {
+  state.interactionMode = Object.prototype.hasOwnProperty.call(INTERACTION_MODES, mode)
+    ? mode
+    : 'planning';
+  const isPlanning = state.interactionMode === 'planning';
+  const isResearch = state.interactionMode === 'research';
+  const config = INTERACTION_MODES[state.interactionMode];
+
+  try {
+    window.localStorage.setItem('geepus_interaction_mode', state.interactionMode);
+  } catch {
+    // Ignore storage issues.
+  }
+
+  el.planningModeButton.classList.toggle('active', isPlanning);
+  el.researchModeButton.classList.toggle('active', isResearch);
+  el.actionModeButton.classList.toggle('active', state.interactionMode === 'action');
+  el.askButton.textContent = config.buttonLabel;
+  el.modeDescription.textContent = config.description;
+}
+
+function restoreInteractionMode() {
+  try {
+    const saved = window.localStorage.getItem('geepus_interaction_mode');
+    if (saved === 'action' || saved === 'planning' || saved === 'research') {
+      setInteractionMode(saved);
+      return;
+    }
+  } catch {
+    // Ignore storage issues.
+  }
+  setInteractionMode('planning');
+}
+
+async function runPrimaryAction() {
+  const prompt = el.promptInput.value.trim();
+  if (!prompt) {
+    setStatus('Please type your request first.');
+    hardFocusPrompt();
+    return;
+  }
+
+  const thread = ensureCurrentThread();
+  const executionMode = state.interactionMode === 'research' ? 'research' : 'action';
+  const resolvedTask = state.interactionMode === 'planning'
+    ? prompt
+    : resolveExecutionTaskPrompt(thread, prompt);
+  const threadContext = buildThreadContextSnippet(thread, prompt, 10);
+
+  appendMessageToCurrentThread('user', prompt);
+  el.promptInput.value = '';
+
+  if (state.interactionMode === 'planning') {
+    await askGeepus({ planningOnly: true, promptOverride: prompt });
+    return;
+  }
+
+  if (isReportLookupPrompt(prompt)) {
+    try {
+      const handled = await answerFromRecentArtifacts(prompt);
+      if (handled) {
+        return;
+      }
+    } catch {
+      // Fall back to lightweight chat answer below.
+    }
+    await askGeepus({ planningOnly: false, promptOverride: prompt });
+    return;
+  }
+
+  await runAgentTask({
+    taskOverride: resolvedTask,
+    executionMode,
+    threadContext,
+  });
+}
+
+function setRunMeta(message) {
+  el.runMeta.textContent = message;
+}
+
+function stopRunPolling() {
+  if (state.runPollTimer) {
+    window.clearInterval(state.runPollTimer);
+    state.runPollTimer = null;
+  }
+}
+
+function startRunPolling(statusPrefix = 'Geepus is working') {
+  stopRunPolling();
+  state.runPollTimer = window.setInterval(async () => {
+    try {
+      await refreshRunList({ silent: true });
+      const active = state.runs.find((run) => run.state === 'running' || run.state === 'paused_approval');
+      if (active) {
+        state.currentRunId = active.runId || state.currentRunId;
+        const suffix = active.state === 'paused_approval'
+          ? 'Waiting for approval.'
+          : `Step ${active.iterations || 0} in progress...`;
+        setStatus(`${statusPrefix}. ${suffix}`);
+      }
+    } catch {
+      // Ignore transient polling errors.
+    }
+  }, 2000);
+}
+
+function clearLane(listEl, emptyLabel) {
+  listEl.innerHTML = '';
+  const item = document.createElement('li');
+  item.className = 'lane-item';
+  item.textContent = emptyLabel;
+  listEl.appendChild(item);
+}
+
+function renderLane(listEl, items, emptyLabel) {
+  listEl.innerHTML = '';
+  const data = Array.isArray(items) ? items : [];
+  if (data.length === 0) {
+    clearLane(listEl, emptyLabel);
+    return;
+  }
+
+  data.slice(-14).forEach((entry) => {
+    const item = document.createElement('li');
+    item.className = `lane-item ${entry.status || ''}`.trim();
+    item.textContent = `#${entry.iteration || '?'} ${entry.text || ''}`.trim();
+    listEl.appendChild(item);
+  });
+}
+
+function renderCheckpoints(checkpoints) {
+  el.checkpointList.innerHTML = '';
+  const data = Array.isArray(checkpoints) ? checkpoints : [];
+  if (data.length === 0) {
+    const item = document.createElement('li');
+    item.className = 'checkpoint-item';
+    item.textContent = 'No checkpoints yet.';
+    el.checkpointList.appendChild(item);
+    return;
+  }
+
+  data.slice(-20).forEach((checkpoint) => {
+    const item = document.createElement('li');
+    item.className = `checkpoint-item ${checkpoint.status || ''}`.trim();
+    item.textContent = `Iteration ${checkpoint.iteration}: ${checkpoint.summary} (${checkpoint.okActions}/${checkpoint.actions} ok)`;
+    el.checkpointList.appendChild(item);
+  });
+}
+
+function renderWorkflow(workflow) {
+  const lanes = workflow && workflow.lanes ? workflow.lanes : {};
+  renderLane(el.plannerLane, lanes.planner, 'Planner is waiting for a run.');
+  renderLane(el.builderLane, lanes.builder, 'Builder actions will appear here.');
+  renderLane(el.reviewerLane, lanes.reviewer, 'Reviewer checks will appear here.');
+  renderCheckpoints(workflow ? workflow.checkpoints : []);
+}
+
+function formatRunTimestamp(value) {
+  if (!value) {
+    return '';
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return '';
+  }
+  return date.toLocaleString();
+}
+
+function formatRelativeTime(value) {
+  if (!value) {
+    return '';
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return '';
+  }
+  const deltaMs = Date.now() - date.getTime();
+  const minute = 60 * 1000;
+  const hour = 60 * minute;
+  const day = 24 * hour;
+  if (deltaMs < minute) return 'just now';
+  if (deltaMs < hour) return `${Math.max(1, Math.floor(deltaMs / minute))}m ago`;
+  if (deltaMs < day) return `${Math.max(1, Math.floor(deltaMs / hour))}h ago`;
+  return `${Math.max(1, Math.floor(deltaMs / day))}d ago`;
+}
+
+function threadTitle(objective) {
+  const first = String(objective || '').split('\n')[0].trim().replace(/\s+/g, ' ');
+  if (!first) {
+    return 'Untitled task';
+  }
+  return first.length > 90 ? `${first.slice(0, 87)}...` : first;
+}
+
+function threadKeyFromRun(run) {
+  const workspace = String(run.workspaceRoot || '').trim().toLowerCase();
+  const objective = String(run.objective || '').trim().toLowerCase().replace(/\s+/g, ' ').slice(0, 180);
+  return `${workspace}::${objective}`;
+}
+
+function statusLabel(stateValue) {
+  const stateText = String(stateValue || '').toLowerCase();
+  if (stateText === 'running') return 'Running';
+  if (stateText === 'completed') return 'Completed';
+  if (stateText === 'paused_approval') return 'Needs approval';
+  if (stateText === 'stopped') return 'Stopped';
+  return 'Unknown';
+}
+
+function summarizeThreads(runs) {
+  const map = new Map();
+  (Array.isArray(runs) ? runs : []).forEach((run) => {
+    const key = threadKeyFromRun(run);
+    const existing = map.get(key);
+    if (!existing) {
+      map.set(key, {
+        id: key,
+        title: threadTitle(run.objective),
+        objective: String(run.objective || ''),
+        workspaceRoot: String(run.workspaceRoot || ''),
+        latestRunId: run.runId,
+        latestState: run.state,
+        latestReason: String(run.reason || ''),
+        latestUpdatedAt: run.updatedAt || run.startedAt || run.createdAt || null,
+        runCount: 1,
+        resumeRunId: run.state !== 'completed' ? run.runId : '',
+      });
+      return;
+    }
+
+    existing.runCount += 1;
+    if (!existing.resumeRunId && run.state !== 'completed') {
+      existing.resumeRunId = run.runId;
+    }
+  });
+
+  return Array.from(map.values()).sort((left, right) => {
+    const l = new Date(left.latestUpdatedAt || 0).getTime();
+    const r = new Date(right.latestUpdatedAt || 0).getTime();
+    return r - l;
+  });
+}
+
+function upsertRunThreads(runSummaries) {
+  const byRunKey = new Map();
+  state.threads.forEach((thread) => {
+    if (thread.runKey) {
+      byRunKey.set(thread.runKey, thread);
+    }
+  });
+
+  runSummaries.forEach((summary) => {
+    const existing = byRunKey.get(summary.id);
+    if (existing) {
+      existing.title = existing.title === 'New Thread' ? summary.title : existing.title;
+      existing.objective = existing.objective || summary.objective;
+      existing.workspaceRoot = summary.workspaceRoot || existing.workspaceRoot;
+      existing.latestRunId = summary.latestRunId || existing.latestRunId;
+      existing.latestState = summary.latestState || existing.latestState;
+      existing.latestReason = summary.latestReason || existing.latestReason;
+      existing.latestUpdatedAt = summary.latestUpdatedAt || existing.latestUpdatedAt;
+      existing.runCount = summary.runCount;
+      existing.resumeRunId = summary.resumeRunId || '';
+      existing.runKey = summary.id;
+      existing.updatedAt = existing.latestUpdatedAt || existing.updatedAt;
+      return;
+    }
+
+    const thread = normalizeThread({
+      id: makeId('thread'),
+      runKey: summary.id,
+      title: summary.title,
+      objective: summary.objective,
+      workspaceRoot: summary.workspaceRoot,
+      latestRunId: summary.latestRunId,
+      latestState: summary.latestState,
+      latestReason: summary.latestReason,
+      latestUpdatedAt: summary.latestUpdatedAt,
+      runCount: summary.runCount,
+      resumeRunId: summary.resumeRunId,
+      messages: [],
+      updatedAt: summary.latestUpdatedAt || new Date().toISOString(),
+    });
+    state.threads.push(thread);
+    byRunKey.set(summary.id, thread);
+  });
+
+  state.threads.sort((left, right) => {
+    const l = new Date(left.latestUpdatedAt || left.updatedAt || 0).getTime();
+    const r = new Date(right.latestUpdatedAt || right.updatedAt || 0).getTime();
+    return r - l;
+  });
+}
+
+async function continueThread(thread) {
+  if (!thread) {
+    return;
+  }
+  selectThread(thread.id);
+
+  if (thread.workspaceRoot) {
+    el.workspaceRootInput.value = thread.workspaceRoot;
+    state.workspaceRoot = thread.workspaceRoot;
+  }
+
+  if (thread.resumeRunId) {
+    setStatus(`Continuing "${thread.title}"...`);
+    await resumeRunById(thread.resumeRunId);
+    return;
+  }
+
+  el.promptInput.value = thread.objective;
+  setStatus(`Reopening "${thread.title}"...`);
+  await runAgentTask({
+    taskOverride: thread.objective,
+    workspaceOverride: thread.workspaceRoot,
+  });
+}
+
+function loadThreadToComposer(thread) {
+  if (!thread) {
+    return;
+  }
+  selectThread(thread.id);
+  el.promptInput.value = thread.objective;
+  if (thread.workspaceRoot) {
+    el.workspaceRootInput.value = thread.workspaceRoot;
+    state.workspaceRoot = thread.workspaceRoot;
+  }
+  setStatus(`Loaded "${thread.title}" into the composer.`);
+  hardFocusPrompt();
+}
+
+function renderThreads() {
+  if (!el.threadList) {
+    return;
+  }
+  const query = String(state.threadQuery || '').trim().toLowerCase();
+  const rows = state.threads.filter((thread) => {
+    if (!query) return true;
+    const blob = [
+      thread.title,
+      thread.objective,
+      thread.workspaceRoot,
+      thread.latestState,
+    ].join(' ').toLowerCase();
+    return blob.includes(query);
+  });
+
+  el.threadList.innerHTML = '';
+  if (rows.length === 0) {
+    const empty = document.createElement('p');
+    empty.className = 'thread-empty';
+    empty.textContent = state.threads.length === 0
+      ? 'No threads yet. Start a task and it will appear here.'
+      : 'No matches for your search.';
+    el.threadList.appendChild(empty);
+    return;
+  }
+
+  rows.slice(0, 120).forEach((thread) => {
+    const card = document.createElement('article');
+    card.className = `thread-item${thread.id === state.currentThreadId ? ' active' : ''}`;
+    card.addEventListener('click', () => {
+      selectThread(thread.id);
+    });
+
+    const title = document.createElement('h3');
+    title.className = 'thread-title';
+    title.textContent = thread.title;
+
+    const meta = document.createElement('p');
+    meta.className = 'thread-meta';
+    if (thread.latestState) {
+      meta.textContent = `${statusLabel(thread.latestState)} • ${thread.runCount} run(s) • ${formatRelativeTime(thread.latestUpdatedAt)}`;
+    } else {
+      meta.textContent = `Draft thread • ${thread.messages.length} message(s) • ${formatRelativeTime(thread.updatedAt)}`;
+    }
+
+    const workspace = document.createElement('p');
+    workspace.className = 'thread-workspace';
+    workspace.textContent = thread.workspaceRoot || '(auto project detection)';
+
+    const actions = document.createElement('div');
+    actions.className = 'thread-actions';
+
+    const continueButton = document.createElement('button');
+    continueButton.className = 'btn';
+    continueButton.textContent = thread.resumeRunId ? 'Continue' : 'Reopen';
+    continueButton.disabled = state.working || (!thread.resumeRunId && !thread.objective);
+    continueButton.addEventListener('click', (event) => {
+      event.stopPropagation();
+      continueThread(thread).catch((error) => {
+        setStatus(error.message || String(error));
+      });
+    });
+
+    const watchButton = document.createElement('button');
+    watchButton.className = 'btn';
+    watchButton.textContent = 'Watch';
+    watchButton.disabled = !thread.latestRunId;
+    watchButton.addEventListener('click', (event) => {
+      event.stopPropagation();
+      openWatchTaskWindow(thread.latestRunId).catch((error) => {
+        setStatus(error.message || String(error));
+      });
+    });
+
+    const loadButton = document.createElement('button');
+    loadButton.className = 'btn';
+    loadButton.textContent = 'Load';
+    loadButton.disabled = !thread.objective;
+    loadButton.addEventListener('click', (event) => {
+      event.stopPropagation();
+      loadThreadToComposer(thread);
+    });
+
+    actions.appendChild(continueButton);
+    actions.appendChild(watchButton);
+    actions.appendChild(loadButton);
+
+    card.appendChild(title);
+    card.appendChild(meta);
+    card.appendChild(workspace);
+    card.appendChild(actions);
+    el.threadList.appendChild(card);
+  });
+}
+
+function setModelOptions(selectNode, models, placeholder) {
+  if (!selectNode) return;
+  selectNode.innerHTML = '';
+  if (!Array.isArray(models) || models.length === 0) {
+    const option = document.createElement('option');
+    option.value = '';
+    option.textContent = placeholder || 'No models loaded yet';
+    selectNode.appendChild(option);
+    selectNode.value = '';
+    return;
+  }
+  models.forEach((model) => {
+    const option = document.createElement('option');
+    option.value = model;
+    option.textContent = model;
+    selectNode.appendChild(option);
+  });
+}
+
+function syncModelSelectors(selectedModel) {
+  const selected = String(selectedModel || '').trim();
+  if (el.modelSelect && el.modelSelect.value !== selected) {
+    el.modelSelect.value = selected;
+  }
+  if (el.modelQuickSelect && el.modelQuickSelect.value !== selected) {
+    el.modelQuickSelect.value = selected;
+  }
+}
+
+function renderModels(models, selected) {
+  state.models = Array.isArray(models) ? models : [];
+  if (state.models.length === 0) {
+    setModelOptions(el.modelSelect, [], 'No models loaded yet');
+    setModelOptions(el.modelQuickSelect, [], 'No models loaded yet');
+    state.model = '';
+    updateSetupWizard();
+    return;
+  }
+  setModelOptions(el.modelSelect, state.models, 'No models loaded yet');
+  setModelOptions(el.modelQuickSelect, state.models, 'No models loaded yet');
+
+  const chosen = state.models.includes(selected) ? selected : state.models[0];
+  state.model = chosen;
+  syncModelSelectors(chosen);
+  updateSetupWizard();
+}
+
+function hardFocusPrompt() {
+  if (document.activeElement !== el.promptInput) {
+    el.promptInput.focus({ preventScroll: true });
+    el.promptInput.setSelectionRange(el.promptInput.value.length, el.promptInput.value.length);
+  }
+}
+
+function installFocusGuards() {
+  const retry = () => {
+    setTimeout(hardFocusPrompt, 40);
+    setTimeout(hardFocusPrompt, 140);
+    setTimeout(hardFocusPrompt, 320);
+  };
+
+  window.addEventListener('focus', retry);
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') {
+      retry();
+    }
+  });
+
+  document.addEventListener('keydown', (event) => {
+    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'l') {
+      event.preventDefault();
+      hardFocusPrompt();
+    }
+  });
+
+  const askCard = document.getElementById('askCard');
+  askCard.addEventListener('pointerdown', (event) => {
+    const target = event.target;
+    const isInteractive = target instanceof HTMLElement
+      && Boolean(target.closest('button, input, textarea, select, option, summary, details, a, [role=\"button\"]'));
+    if (!isInteractive) {
+      requestAnimationFrame(hardFocusPrompt);
+    }
+  });
+
+  retry();
+}
+
+async function loadInitialState() {
+  loadThreadsFromStorage();
+  ensureCurrentThread();
+  renderThreads();
+  renderCurrentThread();
+
+  const settings = await window.geepus.loadSettings();
+
+  state.apiKeyPresent = Boolean(settings.apiKeyPresent);
+  state.provider = settings.provider || 'openai';
+  state.teamMode = settings.teamMode === 'solo' ? 'solo' : 'teams';
+  state.baseUrl = settings.baseUrl || 'https://api.openai.com/v1';
+  state.runLimits = normalizeRunLimits(settings.runLimits || DEFAULT_RUN_LIMITS);
+  updateConnectionBadge();
+  updateSetupWizard();
+
+  el.providerSelect.value = state.provider;
+  el.teamModeSelect.value = state.teamMode;
+  el.baseUrlInput.value = state.baseUrl;
+  applyRunLimitsToInputs(state.runLimits);
+  state.workspaceRoot = settings.workspaceRoot || '';
+  el.workspaceRootInput.value = state.workspaceRoot;
+  renderModels([], settings.model || '');
+  await refreshRunList({ silent: true });
+  ensureCurrentThread();
+  renderCurrentThread();
+
+  if (state.apiKeyPresent && settings.autoDiscover !== false) {
+    try {
+      await refreshModels({ silent: true });
+      setStatus('You are ready. Plan, research, or start a task.');
+    } catch (error) {
+      setStatus(error.message || String(error));
+    }
+  } else {
+    setStatus('Start with Quick Setup: connect Geepus, choose a model, then pick a mode.');
+  }
+}
+
+async function saveSettingsPatch(patch) {
+  const next = await window.geepus.saveSettings(patch);
+  state.apiKeyPresent = Boolean(next.apiKeyPresent);
+  state.provider = next.provider || state.provider;
+  state.teamMode = next.teamMode === 'solo' ? 'solo' : 'teams';
+  state.baseUrl = next.baseUrl || state.baseUrl;
+  state.model = String(next.model || state.model || '').trim();
+  state.runLimits = normalizeRunLimits(next.runLimits || state.runLimits || DEFAULT_RUN_LIMITS);
+  state.workspaceRoot = next.workspaceRoot || state.workspaceRoot;
+  if (el.providerSelect.value !== state.provider) {
+    el.providerSelect.value = state.provider;
+  }
+  if (el.teamModeSelect.value !== state.teamMode) {
+    el.teamModeSelect.value = state.teamMode;
+  }
+  if (el.baseUrlInput.value.trim() !== state.baseUrl) {
+    el.baseUrlInput.value = state.baseUrl;
+  }
+  syncModelSelectors(state.model);
+  applyRunLimitsToInputs(state.runLimits);
+  if (state.workspaceRoot && el.workspaceRootInput.value.trim() !== state.workspaceRoot) {
+    el.workspaceRootInput.value = state.workspaceRoot;
+  }
+  updateConnectionBadge();
+  updateSetupWizard();
+  return next;
+}
+
+async function refreshRunList({ silent = false } = {}) {
+  const runs = await window.geepus.listAgentRuns();
+  state.runs = Array.isArray(runs) ? runs : [];
+  const runSummaries = summarizeThreads(state.runs);
+  upsertRunThreads(runSummaries);
+  saveThreadsToStorage();
+  renderThreads();
+  const latest = state.runs[0];
+
+  if (latest) {
+    const when = formatRunTimestamp(latest.updatedAt);
+    const stateLabel = latest.state === 'completed'
+      ? 'Completed'
+      : (latest.state === 'running' ? 'Running' : 'Needs attention');
+    const runMode = String(latest.executionMode || 'action').toLowerCase() === 'research'
+      ? 'research'
+      : 'action';
+    const source = latest.workspaceDiscoverySource ? ` • ${latest.workspaceDiscoverySource}` : '';
+    setRunMeta(
+      `${stateLabel} • ${runMode} • ${latest.iterations} step(s)${source}${when ? ` • ${when}` : ''}`,
+    );
+    renderWorkflow(latest.workflow || {});
+  } else {
+    setRunMeta('No active run');
+    renderWorkflow({});
+  }
+
+  const resumable = state.runs.find((run) => run.state !== 'completed');
+  el.resumeRunButton.disabled = state.working || !resumable;
+  const active = state.runs.find((run) => run.state === 'running' || run.state === 'paused_approval');
+  state.currentRunId = (active && active.runId) || '';
+  updateStopButton();
+
+  if (!silent) {
+    setStatus(`Loaded ${state.runs.length} run(s).`);
+  }
+}
+
+async function resumeRunById(runId) {
+  if (!runId) {
+    setStatus('No run selected to resume.');
+    return;
+  }
+  setBusy(true);
+  setStatus(`Resuming run ${runId}...`);
+  setResponse('Resuming objective run...', { persist: false });
+  state.currentRunId = runId;
+  startRunPolling('Resuming run');
+  state.runLimits = readRunLimitsFromInputs();
+
+  try {
+    const execution = await window.geepus.resumeAgentObjective({
+      runId,
+      provider: state.provider,
+      teamMode: state.teamMode,
+      allowRisky: true,
+      runLimits: state.runLimits,
+    });
+
+    if (execution.requiresApproval) {
+      const blocked = Array.isArray(execution.blockedActions)
+        ? execution.blockedActions.map((item) => `${item.index}. ${item.tool} [${item.effective_risk}] ${item.reason}`).join('\n')
+        : 'No details';
+      setResponse([
+        'Execution paused for approval.',
+        '',
+        blocked,
+      ].join('\n'), { technical: true });
+      setStatus('Execution paused for approval.');
+      if (execution.workflow) {
+        renderWorkflow(execution.workflow);
+      }
+      await refreshRunList({ silent: true });
+      return;
+    }
+
+    if (execution.model) {
+      state.model = execution.model;
+      if (el.modelSelect.value !== execution.model) {
+        const known = Array.from(el.modelSelect.options).some((option) => option.value === execution.model);
+        if (!known) {
+          const option = document.createElement('option');
+          option.value = execution.model;
+          option.textContent = execution.model;
+          el.modelSelect.appendChild(option);
+        }
+        el.modelSelect.value = execution.model;
+      }
+    }
+
+    el.responseModel.textContent = execution.model
+      ? `Provider: ${execution.provider || state.provider} • Model: ${execution.model}`
+      : '';
+    setResponse(formatObjectiveRunResult(execution));
+    renderWorkflow(execution.workflow || {});
+    setStatus(execution.state === 'completed' ? 'Objective completed.' : 'Objective stopped by limit or policy.');
+    await refreshRunList({ silent: true });
+  } catch (error) {
+    setResponse(error.message || String(error), { technical: true });
+    setStatus(error.message || String(error));
+  } finally {
+    stopRunPolling();
+    setBusy(false);
+    hardFocusPrompt();
+  }
+}
+
+async function resumeLatestRun() {
+  const resumable = state.runs.find((run) => run.state !== 'completed');
+  if (!resumable) {
+    setStatus('No resumable run found.');
+    return;
+  }
+  await resumeRunById(resumable.runId);
+}
+
+async function refreshModels({ silent = false } = {}) {
+  setBusy(true);
+  try {
+    await saveSettingsPatch({
+      provider: el.providerSelect.value,
+      teamMode: el.teamModeSelect.value,
+      baseUrl: el.baseUrlInput.value.trim(),
+      model: state.model,
+      workspaceRoot: el.workspaceRootInput.value.trim(),
+    });
+
+    const result = await window.geepus.listModels();
+    renderModels(result.models, result.selectedModel);
+    await saveSettingsPatch({ model: state.model });
+    if (!silent) {
+      setStatus(`Loaded ${result.models.length} model(s) for ${state.provider}. Selected ${result.selectedModel}.`);
+    }
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function testConnection() {
+  setBusy(true);
+  try {
+    await saveSettingsPatch({
+      provider: el.providerSelect.value,
+      teamMode: el.teamModeSelect.value,
+      baseUrl: el.baseUrlInput.value.trim(),
+      model: state.model,
+      workspaceRoot: el.workspaceRootInput.value.trim(),
+    });
+    const result = await window.geepus.testConnector(state.model);
+    el.responseModel.textContent = result.model ? `Provider: ${state.provider} • Model: ${result.model}` : '';
+    setResponse(result.message || 'Connection test passed.');
+    setStatus(`Connection test passed with ${result.model} (${state.provider}).`);
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function askGeepus({ planningOnly = false, promptOverride = '' } = {}) {
+  if (!state.apiKeyPresent) {
+    setStatus('Please complete Step 1 first: connect Geepus.');
+    el.apiKeyInput.focus();
+    return;
+  }
+
+  const prompt = String(promptOverride || el.promptInput.value || '').trim();
+  if (!prompt) {
+    setStatus('Please type your request first.');
+    hardFocusPrompt();
+    return;
+  }
+
+  setBusy(true);
+  setStatus(planningOnly ? 'Geepus is planning with you...' : 'Geepus is thinking...');
+  setResponse(planningOnly ? 'Building your plan...' : 'Working on it...', { persist: false });
+
+  try {
+    const thread = ensureCurrentThread();
+    const history = recentThreadMessagesForLLM(thread, 16)
+      .filter((item) => !(item.role === 'user' && item.content.toLowerCase() === prompt.toLowerCase()));
+
+    await saveSettingsPatch({
+      provider: el.providerSelect.value,
+      teamMode: el.teamModeSelect.value,
+      baseUrl: el.baseUrlInput.value.trim(),
+      model: state.model,
+      workspaceRoot: el.workspaceRootInput.value.trim(),
+    });
+
+    if (!state.model) {
+      const modelResult = await window.geepus.listModels();
+      renderModels(modelResult.models, modelResult.selectedModel);
+      await saveSettingsPatch({ model: state.model });
+    }
+
+    const result = await window.geepus.ask({
+      prompt,
+      model: state.model,
+      provider: state.provider,
+      baseUrl: state.baseUrl,
+      mode: planningOnly ? 'planning' : 'chat',
+      history,
+    });
+
+    el.responseModel.textContent = result.model ? `Provider: ${state.provider} • Model: ${result.model}` : '';
+    setResponse(result.answer || '(No answer returned)');
+    setStatus('Done.');
+  } catch (error) {
+    setResponse(error.message || String(error), { technical: true });
+    setStatus(error.message || String(error));
+  } finally {
+    setBusy(false);
+    hardFocusPrompt();
+  }
+}
+
+function formatPlan(plan) {
+  const actions = Array.isArray(plan.actions) ? plan.actions : [];
+  const lines = [
+    `Plan: ${plan.summary || 'Agent execution plan'}`,
+    '',
+    'Actions:',
+  ];
+
+  if (actions.length === 0) {
+    lines.push('- (none)');
+  } else {
+    actions.forEach((action, index) => {
+      lines.push(
+        `${index + 1}. [${action.effective_risk || action.risk_level || 'unknown'}] ${action.tool} - ${action.intent}`,
+      );
+      if (action.policy_reason) {
+        lines.push(`   Policy: ${action.policy_reason}`);
+      }
+      if (action.expected_diff) {
+        lines.push(`   Expected: ${action.expected_diff}`);
+      }
+      if (action.rollback_plan) {
+        lines.push(`   Rollback: ${action.rollback_plan}`);
+      }
+    });
+  }
+
+  return lines.join('\n');
+}
+
+function formatExecutionResult(result) {
+  const lines = [
+    `Agent status: ${result.state || 'completed'}`,
+    `Workspace: ${result.workspaceRoot || '(unknown)'}`,
+    '',
+    'Execution log:',
+  ];
+
+  const actions = Array.isArray(result.results) ? result.results : [];
+  if (actions.length === 0) {
+    lines.push('- No actions executed.');
+  } else {
+    actions.forEach((action) => {
+      lines.push(
+        `${action.index}. ${action.ok ? 'OK' : 'FAILED'} [${action.risk_level}] ${action.tool} - ${action.intent}`,
+      );
+      if (action.summary) {
+        lines.push(`   ${action.summary}`);
+      }
+      if (action.output) {
+        lines.push(`   Output:\n${action.output}`);
+      }
+    });
+  }
+
+  lines.push('');
+  lines.push('Report:');
+  lines.push(result.report || 'No report generated.');
+
+  return lines.join('\n');
+}
+
+function formatObjectiveRunResult(result) {
+  const status = String(result.state || 'unknown');
+  const executionMode = String(result.executionMode || 'action').toLowerCase();
+  const modeLabel = executionMode === 'research' ? 'Research Mode' : 'Action Mode';
+  const results = Array.isArray(result.results) ? result.results : [];
+  const writtenFiles = Array.from(new Set(
+    results
+      .filter((item) => item && item.ok === true && (item.tool === 'write_file' || item.tool === 'append_file'))
+      .map((item) => String((item.metadata && item.metadata.path) || '').trim())
+      .filter(Boolean),
+  ));
+  const statusLabel = status === 'completed'
+    ? 'Completed'
+    : (status === 'running' ? 'In progress' : 'Needs attention');
+  const lines = [
+    `Status: ${statusLabel}`,
+    `Run mode: ${modeLabel}`,
+    `What Geepus says: ${result.reason || 'Working through your request.'}`,
+    `Project location: ${result.workspaceRoot || '(auto)'}`,
+    `Mode: ${result.teamMode || state.teamMode}`,
+    '',
+    'Recent activity:',
+  ];
+
+  const iterations = Array.isArray(result.iterations) ? result.iterations : [];
+  if (iterations.length === 0) {
+    lines.push('- Geepus is preparing your task.');
+  } else {
+    const latest = iterations[iterations.length - 1];
+    const okCount = latest.results.filter((item) => item.ok).length;
+    lines.push(`- Step ${latest.iteration}: ${latest.summary} (${okCount}/${latest.results.length} actions successful)`);
+    latest.results.slice(0, 8).forEach((item) => {
+      const owner = item.owner ? `${item.owner}: ` : '';
+      lines.push(`- ${item.ok ? 'Done' : 'Issue'} • ${owner}${item.intent}`);
+    });
+  }
+
+  if (writtenFiles.length > 0) {
+    lines.push('');
+    lines.push('Verified files created/updated:');
+    writtenFiles.slice(0, 12).forEach((filePath) => {
+      lines.push(`- ${filePath}`);
+    });
+  }
+
+  lines.push('');
+  lines.push('Summary:');
+  lines.push(result.report || 'No report generated.');
+  return lines.join('\n');
+}
+
+async function runAgentTask(options = {}) {
+  if (!state.apiKeyPresent) {
+    setStatus('Please complete Step 1 first: connect Geepus.');
+    el.apiKeyInput.focus();
+    return;
+  }
+
+  const task = String(options.taskOverride || el.promptInput.value || '').trim();
+  if (!task) {
+    setStatus('Please type your task first.');
+    hardFocusPrompt();
+    return;
+  }
+
+  const workspaceRoot = typeof options.workspaceOverride === 'string'
+    ? options.workspaceOverride.trim()
+    : el.workspaceRootInput.value.trim();
+  const executionMode = options.executionMode === 'research' ? 'research' : 'action';
+  const threadContext = String(options.threadContext || '').trim();
+  const runningLabel = executionMode === 'research' ? 'research run' : 'autonomous run';
+  const executingLabel = executionMode === 'research' ? 'researching your objective' : 'executing your objective';
+  if (typeof options.workspaceOverride === 'string') {
+    el.workspaceRootInput.value = workspaceRoot;
+    state.workspaceRoot = workspaceRoot;
+  }
+
+  const thread = ensureCurrentThread();
+  thread.objective = task;
+  thread.workspaceRoot = workspaceRoot || thread.workspaceRoot;
+  thread.runKey = threadKeyFromRun({
+    objective: thread.objective || task,
+    workspaceRoot: thread.workspaceRoot,
+  });
+  thread.updatedAt = new Date().toISOString();
+  saveThreadsToStorage();
+  renderThreads();
+
+  setBusy(true);
+  setStatus(`Starting ${runningLabel}...`);
+  setResponse(executionMode === 'research'
+    ? 'Geepus is researching your objective...'
+    : 'Geepus is running your objective...', { persist: false });
+  startRunPolling(executionMode === 'research' ? 'Geepus is researching' : 'Geepus is executing');
+  state.runLimits = readRunLimitsFromInputs();
+
+  try {
+    await saveSettingsPatch({
+      provider: el.providerSelect.value,
+      teamMode: el.teamModeSelect.value,
+      baseUrl: el.baseUrlInput.value.trim(),
+      model: state.model,
+      workspaceRoot,
+      runLimits: state.runLimits,
+    });
+
+    if (!state.model) {
+      const modelResult = await window.geepus.listModels();
+      renderModels(modelResult.models, modelResult.selectedModel);
+      await saveSettingsPatch({ model: state.model });
+    }
+
+    setStatus(`Geepus is ${executingLabel}...`);
+    const execution = await window.geepus.runAgentObjective({
+      task,
+      executionMode,
+      model: state.model,
+      provider: state.provider,
+      teamMode: state.teamMode,
+      baseUrl: state.baseUrl,
+      workspaceRoot,
+      allowRisky: true,
+      runLimits: state.runLimits,
+      threadContext,
+    });
+
+    if (execution.requiresApproval) {
+      const blocked = Array.isArray(execution.blockedActions)
+        ? execution.blockedActions.map((item) => `${item.index}. ${item.tool} [${item.effective_risk}] ${item.reason}`).join('\n')
+        : 'No details';
+      setResponse([
+        'Execution paused for approval.',
+        '',
+        blocked,
+      ].join('\n'), { technical: true });
+      setStatus('Execution paused for approval.');
+      if (execution.workflow) {
+        renderWorkflow(execution.workflow);
+      }
+      await refreshRunList({ silent: true });
+      return;
+    }
+
+    if (execution.model) {
+      state.model = execution.model;
+      if (el.modelSelect.value !== execution.model) {
+        const known = Array.from(el.modelSelect.options).some((option) => option.value === execution.model);
+        if (!known) {
+          const option = document.createElement('option');
+          option.value = execution.model;
+          option.textContent = execution.model;
+          el.modelSelect.appendChild(option);
+        }
+        el.modelSelect.value = execution.model;
+      }
+    }
+
+    el.responseModel.textContent = execution.model
+      ? `Provider: ${execution.provider || state.provider} • Model: ${execution.model}`
+      : '';
+    setResponse(formatObjectiveRunResult(execution));
+    renderWorkflow(execution.workflow || {});
+    const doneStatus = execution.state === 'completed'
+      ? (executionMode === 'research' ? 'Research completed.' : 'Objective completed.')
+      : 'Objective stopped by limit or policy.';
+    setStatus(doneStatus);
+    await refreshRunList({ silent: true });
+  } catch (error) {
+    setResponse(error.message || String(error), { technical: true });
+    setStatus(error.message || String(error));
+  } finally {
+    stopRunPolling();
+    setBusy(false);
+    hardFocusPrompt();
+  }
+}
+
+async function openWatchTaskWindow(runIdOverride = '') {
+  if (runIdOverride) {
+    await window.geepus.openWatchTask({ runId: runIdOverride });
+    return;
+  }
+  let runIdForWatch = '';
+  try {
+    const runs = await window.geepus.listAgentRuns();
+    if (Array.isArray(runs) && runs.length > 0) {
+      state.runs = runs;
+      const active = runs.find((run) => run.state === 'running' || run.state === 'paused_approval');
+      state.currentRunId = (active && active.runId) || '';
+      runIdForWatch = state.currentRunId || runs[0].runId || '';
+    }
+  } catch {
+    // Fallback to cached run list.
+  }
+  const runId = runIdForWatch || state.currentRunId || (state.runs[0] && state.runs[0].runId) || '';
+  await window.geepus.openWatchTask({ runId });
+}
+
+async function stopCurrentTask() {
+  setStatus('Stopping task...');
+  setResponse('Stopping current task...', { persist: false });
+  try {
+    const result = await window.geepus.stopAgentObjective({ runId: state.currentRunId || '' });
+    if (result && result.ok) {
+      state.currentRunId = result.runId || state.currentRunId;
+      setStatus('Stop requested. Geepus is shutting down this task.');
+      setResponse(result.message || 'Stop requested.');
+      await refreshRunList({ silent: true });
+    } else {
+      setStatus('No running task was found to stop.');
+    }
+  } catch (error) {
+    setResponse(error.message || String(error), { technical: true });
+    setStatus(error.message || String(error));
+  }
+}
+
+function installEvents() {
+  el.refreshRunsButton.addEventListener('click', () => {
+    refreshRunList().catch((error) => {
+      setStatus(error.message || String(error));
+    });
+  });
+  el.resumeRunButton.addEventListener('click', () => {
+    resumeLatestRun().catch((error) => {
+      setStatus(error.message || String(error));
+    });
+  });
+  el.watchTaskButton.addEventListener('click', () => {
+    openWatchTaskWindow().catch((error) => {
+      setStatus(error.message || String(error));
+    });
+  });
+  el.newThreadButton.addEventListener('click', () => {
+    createNewThread();
+    el.promptInput.value = '';
+    setStatus('Started a new thread.');
+    hardFocusPrompt();
+  });
+  el.threadSearchInput.addEventListener('input', () => {
+    state.threadQuery = el.threadSearchInput.value || '';
+    renderThreads();
+  });
+
+  el.askButton.addEventListener('click', () => {
+    runPrimaryAction().catch((error) => {
+      setStatus(error.message || String(error));
+    });
+  });
+  el.planningModeButton.addEventListener('click', () => {
+    setInteractionMode('planning');
+    setStatus(INTERACTION_MODES.planning.status);
+  });
+  el.researchModeButton.addEventListener('click', () => {
+    setInteractionMode('research');
+    setStatus(INTERACTION_MODES.research.status);
+  });
+  el.actionModeButton.addEventListener('click', () => {
+    setInteractionMode('action');
+    setStatus(INTERACTION_MODES.action.status);
+  });
+
+  el.promptInput.addEventListener('keydown', (event) => {
+    if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
+      event.preventDefault();
+      runPrimaryAction().catch((error) => {
+        setStatus(error.message || String(error));
+      });
+    }
+  });
+
+  el.clearPromptButton.addEventListener('click', () => {
+    el.promptInput.value = '';
+    hardFocusPrompt();
+  });
+
+  el.stopTaskButton.addEventListener('click', () => {
+    stopCurrentTask().catch((error) => {
+      setStatus(error.message || String(error));
+    });
+  });
+
+  el.showSetupButton.addEventListener('click', () => {
+    state.showSetupPanels = !state.showSetupPanels;
+    updateSetupWizard();
+    if (state.showSetupPanels) {
+      el.advancedSettingsCard.open = true;
+    }
+  });
+  el.openSettingsButton.addEventListener('click', () => {
+    openSettingsPanel();
+  });
+
+  el.toggleKeyButton.addEventListener('click', () => {
+    const isPassword = el.apiKeyInput.type === 'password';
+    el.apiKeyInput.type = isPassword ? 'text' : 'password';
+    el.toggleKeyButton.textContent = isPassword ? 'Hide' : 'Show';
+    el.apiKeyInput.focus({ preventScroll: true });
+  });
+
+  el.saveKeyButton.addEventListener('click', async () => {
+    const key = el.apiKeyInput.value.trim();
+    if (!key) {
+      setStatus('Paste your API key first.');
+      el.apiKeyInput.focus();
+      return;
+    }
+
+    try {
+      setBusy(true);
+      await saveSettingsPatch({
+        apiKey: key,
+        provider: el.providerSelect.value,
+        teamMode: el.teamModeSelect.value,
+        baseUrl: el.baseUrlInput.value.trim(),
+        workspaceRoot: el.workspaceRootInput.value.trim(),
+      });
+      el.apiKeyInput.value = '';
+      setStatus('Connected. Loading your available models...');
+      await refreshModels({ silent: true });
+      setStatus('Setup complete. You can start a task now.');
+      hardFocusPrompt();
+    } catch (error) {
+      setStatus(error.message || String(error));
+    } finally {
+      setBusy(false);
+    }
+  });
+
+  el.clearKeyButton.addEventListener('click', async () => {
+    try {
+      setBusy(true);
+      const next = await window.geepus.clearKey();
+      state.apiKeyPresent = Boolean(next.apiKeyPresent);
+      updateConnectionBadge();
+      renderModels([], '');
+      setStatus('Connection removed.');
+    } catch (error) {
+      setStatus(error.message || String(error));
+    } finally {
+      setBusy(false);
+      hardFocusPrompt();
+    }
+  });
+
+  el.listModelsButton.addEventListener('click', () => {
+    refreshModels().catch((error) => {
+      setStatus(error.message || String(error));
+    });
+  });
+  el.refreshModelsInlineButton.addEventListener('click', () => {
+    refreshModels().catch((error) => {
+      setStatus(error.message || String(error));
+    });
+  });
+
+  el.providerSelect.addEventListener('change', async () => {
+    try {
+      setBusy(true);
+      const next = await saveSettingsPatch({ provider: el.providerSelect.value });
+      state.provider = next.provider || state.provider;
+      state.baseUrl = next.baseUrl || state.baseUrl;
+      setStatus(`Service set to ${state.provider}.`);
+      await refreshModels({ silent: true });
+      setStatus('Models refreshed for selected service.');
+    } catch (error) {
+      setStatus(error.message || String(error));
+    } finally {
+      setBusy(false);
+    }
+  });
+
+  el.teamModeSelect.addEventListener('change', async () => {
+    state.teamMode = el.teamModeSelect.value === 'solo' ? 'solo' : 'teams';
+    try {
+      await saveSettingsPatch({ teamMode: state.teamMode });
+      setStatus(`Work style set to ${state.teamMode === 'teams' ? 'team mode' : 'solo mode'}.`);
+    } catch (error) {
+      setStatus(error.message || String(error));
+    }
+  });
+
+  const runLimitInputs = [
+    el.limitMaxRuntimeMinutes,
+    el.limitMaxIterations,
+    el.limitMaxActions,
+    el.limitMaxModelCallsPerMinute,
+    el.limitMaxToolCallsPerMinute,
+    el.limitIdleTimeoutSeconds,
+    el.limitConsecutiveDriftLimit,
+  ];
+  runLimitInputs.forEach((input) => {
+    input.addEventListener('change', () => {
+      scheduleRunLimitsSave();
+    });
+  });
+
+  el.modelSelect.addEventListener('change', async () => {
+    state.model = el.modelSelect.value;
+    syncModelSelectors(state.model);
+    try {
+      await saveSettingsPatch({ model: state.model });
+      setStatus(`Selected ${state.model}.`);
+    } catch (error) {
+      setStatus(error.message || String(error));
+    }
+  });
+  el.modelQuickSelect.addEventListener('change', async () => {
+    state.model = el.modelQuickSelect.value;
+    syncModelSelectors(state.model);
+    try {
+      await saveSettingsPatch({ model: state.model });
+      setStatus(`Selected ${state.model}.`);
+    } catch (error) {
+      setStatus(error.message || String(error));
+    }
+  });
+
+  el.workspaceRootInput.addEventListener('change', async () => {
+    state.workspaceRoot = el.workspaceRootInput.value.trim();
+    try {
+      await saveSettingsPatch({ workspaceRoot: state.workspaceRoot });
+      setStatus(state.workspaceRoot
+        ? `Project folder saved.`
+        : 'Auto-find enabled.');
+    } catch (error) {
+      setStatus(error.message || String(error));
+    }
+  });
+
+  el.useAutoFindButton.addEventListener('click', async () => {
+    try {
+      state.workspaceRoot = '';
+      el.workspaceRootInput.value = '';
+      await saveSettingsPatch({ workspaceRoot: '' });
+      setStatus('Auto-find enabled. Geepus will locate relevant project files automatically.');
+    } catch (error) {
+      setStatus(error.message || String(error));
+    }
+  });
+
+  el.testButton.addEventListener('click', () => {
+    testConnection().catch((error) => {
+      setStatus(error.message || String(error));
+    });
+  });
+
+  el.restartButton.addEventListener('click', async () => {
+    setStatus('Restarting app...');
+    await window.geepus.restartApp();
+  });
+}
+
+(async function boot() {
+  installEvents();
+  installFocusGuards();
+  restoreInteractionMode();
+
+  try {
+    await loadInitialState();
+  } catch (error) {
+    setStatus(error.message || String(error));
+  }
+
+  hardFocusPrompt();
+})();

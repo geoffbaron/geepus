@@ -1,0 +1,15 @@
+node_modules/
+out/
+dist/
+build/
+release/
+.DS_Store
+*.log
+.env
+.env.*
+coverage/
+
+# prototype reference copy — see PLAN.md §12; keep source, drop the junk it may accumulate
+snapshot/electron-geepus/node_modules/
+snapshot/electron-geepus/dist/
+snapshot/.build/

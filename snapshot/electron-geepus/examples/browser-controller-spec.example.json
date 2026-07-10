@@ -1,0 +1,55 @@
+{
+  "version": 1,
+  "id": "kombom-signup",
+  "name": "Kombom Signup Controller",
+  "match": {
+    "domains": ["kombom.com"],
+    "intents": ["signup", "verification"]
+  },
+  "route": {
+    "preferredEntryUrls": [
+      "https://kombom.com/signup"
+    ],
+    "fallbackEntryUrls": [
+      "https://kombom.com/"
+    ],
+    "linkTextPriority": [
+      "Get Started",
+      "Sign Up",
+      "Create Account"
+    ],
+    "emailVerification": {
+      "inboxSubjectKeywords": [
+        "kombom",
+        "verify"
+      ],
+      "verifyLinkTexts": [
+        "Verify Email",
+        "Confirm Email",
+        "Activate Account"
+      ]
+    }
+  },
+  "playbook": {
+    "steps": [
+      {
+        "kind": "launch",
+        "action": "goto",
+        "url": "https://kombom.com/signup",
+        "requiresTexts": ["Kombom"]
+      },
+      {
+        "kind": "action",
+        "action": "fill",
+        "targetLabel": "Email",
+        "requiresTexts": ["Sign Up"]
+      },
+      {
+        "kind": "action",
+        "action": "click",
+        "targetText": "Create Account",
+        "requiresTexts": ["Sign Up"]
+      }
+    ]
+  }
+}

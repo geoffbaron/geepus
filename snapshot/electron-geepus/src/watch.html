@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Watch Geepus Task</title>
+    <link rel="stylesheet" href="watch.css" />
+  </head>
+  <body>
+    <main class="watch-shell">
+      <header class="watch-header">
+        <h1>Watch Geepus Task</h1>
+        <p id="runSummary">Waiting for run...</p>
+      </header>
+
+      <section id="phaseBar" class="phase-bar" hidden>
+        <div class="phase-indicator">
+          <span id="phaseIcon" class="phase-icon">⚙️</span>
+          <span id="phaseLabel" class="phase-label">Starting...</span>
+        </div>
+        <div class="phase-progress">
+          <div id="phaseProgressFill" class="phase-progress-fill"></div>
+        </div>
+        <p id="phaseDetail" class="phase-detail"></p>
+      </section>
+
+      <section class="card objective-card">
+        <h2>Objective</h2>
+        <p id="objectiveText">No task selected yet.</p>
+      </section>
+
+      <section id="completionCard" class="card completion-card" hidden>
+        <h2 id="completionTitle">&#x2139;&#xfe0f; Run Summary</h2>
+        <div id="completionReport" class="completion-report"></div>
+      </section>
+
+      <section class="card agents-card">
+        <h2>Agent Team</h2>
+        <div id="agentGrid" class="agent-grid"></div>
+      </section>
+
+      <section class="card timeline-card">
+        <h2>Live Timeline</h2>
+        <div id="eventList" class="event-list"></div>
+      </section>
+    </main>
+
+    <script src="watch.js"></script>
+  </body>
+</html>

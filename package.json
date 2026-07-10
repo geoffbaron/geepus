@@ -1,0 +1,40 @@
+{
+  "name": "geepus",
+  "version": "0.1.0",
+  "description": "Geepus — a local-only LLM digital assistant",
+  "main": "./out/main/index.js",
+  "author": "Geoff Baron",
+  "private": true,
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "start": "electron-vite preview",
+    "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
+    "lint": "eslint . --max-warnings 0",
+    "test": "vitest run",
+    "dist:lite": "npm run build && electron-builder --mac --config electron-builder.yml",
+    "dist:full": "GEEPUS_BUNDLE=full npm run build && GEEPUS_BUNDLE=full electron-builder --mac --config electron-builder.yml"
+  },
+  "dependencies": {
+    "ws": "^8.19.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@typescript-eslint/eslint-plugin": "^8.15.0",
+    "@typescript-eslint/parser": "^8.15.0",
+    "@vitejs/plugin-react": "^4.3.4",
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8",
+    "electron-vite": "^2.3.0",
+    "eslint": "^9.15.0",
+    "eslint-plugin-react-hooks": "^5.0.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "typescript": "^5.7.2",
+    "vite": "^5.4.11",
+    "vitest": "^2.1.5",
+    "zod": "^3.23.8"
+  }
+}
