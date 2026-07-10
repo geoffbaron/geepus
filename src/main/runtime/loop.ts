@@ -1,0 +1,163 @@
+import type { ChatMessage, ChatRequest, ToolCall } from '@shared/model';
+import type { AgentEvent, RunBudgets, TaskClass, ToolResult } from '@shared/agent';
+import type { ModelProvider } from '../models/provider';
+import type { AuditLog } from '../policy/audit';
+import { getToolDefinitions, executeTool } from '../tools/registry';
+import { classifyObjective } from './classify';
+import { checkCompletion } from './complete';
+
+const DEFAULT_BUDGETS: RunBudgets = {
+  maxIterations: 8,
+  maxToolCalls: 20,
+  maxRuntimeMs: 5 * 60_000,
+};
+
+export interface RunObjectiveOptions {
+  objective: string;
+  workspaceRoot: string;
+  provider: ModelProvider;
+  budgets?: Partial<RunBudgets>;
+  auditLog?: AuditLog;
+}
+
+function systemPromptFor(taskClass: TaskClass, tools: ReturnType<typeof getToolDefinitions>): string {
+  const toolList = tools.map((t) => `- ${t.name}: ${t.description}`).join('\n');
+  const lines = [
+    'You are Geepus, a local-only digital assistant.',
+    `The current task is classified as "${taskClass}".`,
+  ];
+  if (taskClass === 'lookup' || taskClass === 'research') {
+    lines.push('Answer as soon as you have the information — do not write files or run commands unless the user actually asked for that.');
+  }
+  lines.push('Available tools:', toolList, 'Call a tool when you need to. When you have a final answer, respond with plain text and no tool calls.');
+  return lines.join('\n\n');
+}
+
+function parseToolArgs(call: ToolCall): Record<string, unknown> {
+  try {
+    const parsed: unknown = JSON.parse(call.arguments || '{}');
+    return typeof parsed === 'object' && parsed !== null ? (parsed as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * The plan→act→observe loop (PLAN.md §4). Deliberately small: classify once, call the
+ * model, execute any tool calls through the policy-gated registry, check the task-class-
+ * aware completion gate, repeat. Native tool-calling only for now (Ollama/OpenRouter) —
+ * a JSON-fallback protocol for providers without native tool support (the bundled model)
+ * is a follow-up, not required for this milestone's accept criteria.
+ */
+export async function* runObjective(options: RunObjectiveOptions): AsyncGenerator<AgentEvent> {
+  const budgets: RunBudgets = { ...DEFAULT_BUDGETS, ...options.budgets };
+  const taskClass = classifyObjective(options.objective);
+  yield { type: 'classified', taskClass };
+
+  const tools = getToolDefinitions();
+  const messages: ChatMessage[] = [
+    { role: 'system', content: systemPromptFor(taskClass, tools) },
+    { role: 'user', content: options.objective },
+  ];
+
+  const toolResults: ToolResult[] = [];
+  let toolCallCount = 0;
+  const startTime = Date.now();
+  let iteration = 0;
+
+  while (iteration < budgets.maxIterations) {
+    if (Date.now() - startTime > budgets.maxRuntimeMs) {
+      yield { type: 'done', success: false, reason: 'Runtime budget exceeded.' };
+      return;
+    }
+    iteration += 1;
+    yield { type: 'iteration_start', iteration };
+
+    const request: ChatRequest = { messages, tools };
+    let assistantText = '';
+    const pendingCalls: ToolCall[] = [];
+    let sawError: string | null = null;
+
+    for await (const chunk of options.provider.chat(request)) {
+      if (chunk.type === 'text') {
+        assistantText += chunk.delta;
+        yield { type: 'text', delta: chunk.delta };
+      } else if (chunk.type === 'tool_call') {
+        pendingCalls.push(chunk.toolCall);
+        yield { type: 'tool_call', toolCall: chunk.toolCall };
+      } else if (chunk.type === 'error') {
+        sawError = chunk.message;
+      }
+    }
+
+    if (sawError) {
+      yield { type: 'error', message: sawError };
+      yield { type: 'done', success: false, reason: sawError };
+      return;
+    }
+
+    messages.push({
+      role: 'assistant',
+      content: assistantText,
+      toolCalls: pendingCalls.length ? pendingCalls : undefined,
+    });
+
+    if (pendingCalls.length > 0) {
+      let budgetExceeded = false;
+      for (const call of pendingCalls) {
+        if (toolCallCount >= budgets.maxToolCalls) {
+          budgetExceeded = true;
+          break;
+        }
+        toolCallCount += 1;
+        const result = await executeTool({
+          toolName: call.name,
+          args: parseToolArgs(call),
+          context: { workspaceRoot: options.workspaceRoot },
+          auditLog: options.auditLog,
+        });
+        toolResults.push(result);
+        yield { type: 'tool_result', toolCall: call, result };
+        messages.push({ role: 'tool', content: JSON.stringify(result), toolCallId: call.id });
+      }
+      if (budgetExceeded) {
+        yield { type: 'done', success: false, reason: 'Tool call budget exceeded.' };
+        return;
+      }
+    }
+
+    const completion = checkCompletion(taskClass, toolResults, assistantText.trim().length > 0 && pendingCalls.length === 0);
+    if (completion.done) {
+      const reflection = await tryReflect(options.provider, messages);
+      yield { type: 'done', success: true, reason: completion.reason, reflection };
+      return;
+    }
+  }
+
+  yield { type: 'done', success: false, reason: 'Iteration budget exceeded.' };
+}
+
+/** One extra model call at the end of a run: what worked, what to remember for next time
+ * (PLAN.md §4 item 5). Best-effort — persistence into MemoryService lands in M4. */
+async function tryReflect(provider: ModelProvider, messages: ChatMessage[]): Promise<string | undefined> {
+  try {
+    const reflectionRequest: ChatRequest = {
+      messages: [
+        ...messages,
+        {
+          role: 'user',
+          content:
+            'In one short sentence, note anything worth remembering about how you solved this for next time (or say "nothing notable").',
+        },
+      ],
+    };
+    let text = '';
+    for await (const chunk of provider.chat(reflectionRequest)) {
+      if (chunk.type === 'text') text += chunk.delta;
+      if (chunk.type === 'done' || chunk.type === 'error') break;
+    }
+    return text.trim() || undefined;
+  } catch {
+    return undefined;
+  }
+}

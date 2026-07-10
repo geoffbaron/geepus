@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import type { IpcApi } from '@shared/ipc';
 import type { ChatChunk, OllamaPullProgress } from '@shared/model';
+import type { AgentEvent, PendingApproval } from '@shared/agent';
 
 const geepus: IpcApi = {
   app: {
@@ -51,6 +52,23 @@ const geepus: IpcApi = {
     launchOllama: () => ipcRenderer.invoke('setup.launchOllama'),
     requestNotificationPermission: () => ipcRenderer.invoke('setup.requestNotificationPermission'),
     completeOnboarding: () => ipcRenderer.invoke('setup.completeOnboarding'),
+  },
+  runtime: {
+    run: (request, onEvent) => {
+      const requestId = crypto.randomUUID();
+      const channel = `runtime.event:${requestId}`;
+      const listener = (_event: Electron.IpcRendererEvent, agentEvent: AgentEvent): void => onEvent(agentEvent);
+      ipcRenderer.on(channel, listener);
+      void ipcRenderer.invoke('runtime.run', requestId, request);
+      return () => ipcRenderer.removeListener(channel, listener);
+    },
+    listPendingApprovals: () => ipcRenderer.invoke('runtime.listPendingApprovals'),
+    resolveApproval: (id, approved) => ipcRenderer.invoke('runtime.resolveApproval', id, approved),
+    onApprovalRequested: (onApproval) => {
+      const listener = (_event: Electron.IpcRendererEvent, approval: PendingApproval): void => onApproval(approval);
+      ipcRenderer.on('runtime.approvalRequested', listener);
+      return () => ipcRenderer.removeListener('runtime.approvalRequested', listener);
+    },
   },
 };
 

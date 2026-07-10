@@ -9,6 +9,7 @@
 import type { ChatChunk, ChatRequest, OllamaPullProgress, ProviderStatus } from './model';
 import type { Settings } from './settings';
 import type { DiscoveryReport, InstallOllamaResult, MachineProfile, Recommendation, SetupPlan } from './setup';
+import type { AgentEvent, PendingApproval, RunRequest } from './agent';
 
 export interface DownloadProgress {
   downloadedBytes: number;
@@ -41,6 +42,13 @@ export interface IpcApi {
     launchOllama: () => Promise<boolean>;
     requestNotificationPermission: () => Promise<boolean>;
     completeOnboarding: () => Promise<Settings>;
+  };
+  runtime: {
+    /** Streams events via onEvent as they arrive; returns an unsubscribe function. */
+    run: (request: RunRequest, onEvent: (event: AgentEvent) => void) => () => void;
+    listPendingApprovals: () => Promise<PendingApproval[]>;
+    resolveApproval: (id: string, approved: boolean) => Promise<boolean>;
+    onApprovalRequested: (onApproval: (approval: PendingApproval) => void) => () => void;
   };
 }
 

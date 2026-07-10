@@ -1,9 +1,11 @@
 import { useEffect, useState } from 'react';
 import { Onboarding } from './onboarding/Onboarding';
 import { Chat } from './chat/Chat';
+import { AgentRunner } from './agent/AgentRunner';
+import { ApprovalsInbox } from './agent/ApprovalsInbox';
 import { PermissionsPanel } from './settings/PermissionsPanel';
 
-type View = 'chat' | 'permissions';
+type View = 'chat' | 'agent' | 'approvals' | 'permissions';
 
 export function App() {
   const [onboardingComplete, setOnboardingComplete] = useState<boolean | null>(null);
@@ -16,17 +18,26 @@ export function App() {
   if (onboardingComplete === null) return null;
   if (!onboardingComplete) return <Onboarding onComplete={() => setOnboardingComplete(true)} />;
 
+  const views: Array<{ id: View; label: string }> = [
+    { id: 'chat', label: 'Chat' },
+    { id: 'agent', label: 'Agent' },
+    { id: 'approvals', label: 'Approvals' },
+    { id: 'permissions', label: 'Permissions' },
+  ];
+
   return (
     <main className="shell">
       <nav className="tabs">
-        <button className={view === 'chat' ? 'active' : ''} onClick={() => setView('chat')}>
-          Chat
-        </button>
-        <button className={view === 'permissions' ? 'active' : ''} onClick={() => setView('permissions')}>
-          Permissions
-        </button>
+        {views.map((v) => (
+          <button key={v.id} className={view === v.id ? 'active' : ''} onClick={() => setView(v.id)}>
+            {v.label}
+          </button>
+        ))}
       </nav>
-      {view === 'chat' ? <Chat /> : <PermissionsPanel />}
+      {view === 'chat' && <Chat />}
+      {view === 'agent' && <AgentRunner />}
+      {view === 'approvals' && <ApprovalsInbox />}
+      {view === 'permissions' && <PermissionsPanel />}
     </main>
   );
 }
