@@ -23,6 +23,10 @@ export interface RunObjectiveOptions {
   /** Optional — when provided, relevant learned strategies/skills are injected into the
    * system prompt, and a successful run's outcome is recorded back into memory (M4). */
   memory?: MemoryService;
+  /** Prior user/assistant turns of the same conversation, inserted between the system
+   * prompt and the current objective. Tool/system entries are filtered out — stale tool
+   * call ids from a previous run would confuse providers that validate them. */
+  history?: ChatMessage[];
 }
 
 async function systemPromptFor(
@@ -78,11 +82,16 @@ export async function* runObjective(options: RunObjectiveOptions): AsyncGenerato
   yield { type: 'classified', taskClass };
 
   const tools = getToolDefinitions();
+  const priorTurns = (options.history ?? [])
+    .filter((m) => (m.role === 'user' || m.role === 'assistant') && m.content.trim().length > 0)
+    .map((m): ChatMessage => ({ role: m.role, content: m.content }))
+    .slice(-20); // bounded — old turns matter less than blowing the context window
   const messages: ChatMessage[] = [
     {
       role: 'system',
       content: await systemPromptFor(taskClass, tools, options.objective, options.workspaceRoot, options.memory),
     },
+    ...priorTurns,
     { role: 'user', content: options.objective },
   ];
 

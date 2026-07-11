@@ -1,14 +1,17 @@
 import { useEffect, useState } from 'react';
 import { Onboarding } from './onboarding/Onboarding';
 import { Chat } from './chat/Chat';
-import { AgentRunner } from './agent/AgentRunner';
-import { ApprovalsInbox } from './agent/ApprovalsInbox';
-import { MemoryBrowser } from './memory/MemoryBrowser';
-import { SchedulesPanel } from './schedule/SchedulesPanel';
 import { BriefPanel } from './brief/BriefPanel';
+import { SchedulesPanel } from './schedule/SchedulesPanel';
 import { PermissionsPanel } from './settings/PermissionsPanel';
+import { ApprovalRequests } from './components/ApprovalRequests';
 
-type View = 'chat' | 'agent' | 'approvals' | 'memory' | 'schedules' | 'brief' | 'permissions';
+/**
+ * Four places, no jargon: Chat (the assistant), Today (your summary), Routines
+ * (what it does on its own), Settings. Permission requests pop up wherever you are —
+ * there's no inbox to check.
+ */
+type View = 'chat' | 'today' | 'routines' | 'settings';
 
 export function App() {
   const [onboardingComplete, setOnboardingComplete] = useState<boolean | null>(null);
@@ -23,30 +26,26 @@ export function App() {
 
   const views: Array<{ id: View; label: string }> = [
     { id: 'chat', label: 'Chat' },
-    { id: 'agent', label: 'Agent' },
-    { id: 'brief', label: 'Brief' },
-    { id: 'schedules', label: 'Schedules' },
-    { id: 'approvals', label: 'Approvals' },
-    { id: 'memory', label: 'Memory' },
-    { id: 'permissions', label: 'Permissions' },
+    { id: 'today', label: 'Today' },
+    { id: 'routines', label: 'Routines' },
+    { id: 'settings', label: 'Settings' },
   ];
 
   return (
     <main className="shell">
       <nav className="tabs">
+        <span className="wordmark">Geepus</span>
         {views.map((v) => (
           <button key={v.id} className={view === v.id ? 'active' : ''} onClick={() => setView(v.id)}>
             {v.label}
           </button>
         ))}
       </nav>
+      <ApprovalRequests />
       {view === 'chat' && <Chat />}
-      {view === 'agent' && <AgentRunner />}
-      {view === 'brief' && <BriefPanel />}
-      {view === 'schedules' && <SchedulesPanel />}
-      {view === 'approvals' && <ApprovalsInbox />}
-      {view === 'memory' && <MemoryBrowser />}
-      {view === 'permissions' && <PermissionsPanel />}
+      {view === 'today' && <BriefPanel />}
+      {view === 'routines' && <SchedulesPanel />}
+      {view === 'settings' && <PermissionsPanel />}
     </main>
   );
 }

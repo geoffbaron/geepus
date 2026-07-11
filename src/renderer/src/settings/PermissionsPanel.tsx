@@ -1,60 +1,102 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import type { ProviderId, ProviderStatus } from '@shared/model';
+import { MailSetupPanel } from '../mail/MailSetupPanel';
+import { MemoryBrowser } from '../memory/MemoryBrowser';
 
-interface PermissionInfo {
-  name: string;
-  description: string;
-  when: string;
-}
+/**
+ * The one Settings page. Everything a normal person needs is a plain-language card;
+ * everything technical (which "brain" is running, the dev-only cloud provider) lives
+ * under a collapsed "Advanced" section nobody has to open.
+ */
 
-// Everything but notifications is requested by the feature that needs it, the first time
-// it's needed — this panel is where a user can read ahead of time what that will involve
-// (PLAN.md §6.6). It's informational for now; later milestones make these gates real.
-const DEFERRED_PERMISSIONS: PermissionInfo[] = [
-  {
-    name: 'Email (IMAP, read-only)',
-    description: "Lets the Inbox agent read your unread mail to summarize it. Geepus never sends, moves, or deletes mail without your explicit approval.",
-    when: 'Requested when you turn on the Inbox agent.',
-  },
-  {
-    name: 'Browser automation',
-    description: 'Lets the Browser agent complete web tasks for you, either in a private built-in browser or by driving your real Chrome via the Geepus extension.',
-    when: 'Requested the first time you ask Geepus to do something in a browser.',
-  },
-  {
-    name: 'Folder access',
-    description: 'Lets Geepus read and write files inside a specific project folder for a task.',
-    when: 'Requested the first time a task needs a workspace folder.',
-  },
-];
+const BRAIN_LABELS: Record<ProviderId, { label: string; blurb: string }> = {
+  bundled: { label: 'Built-in brain', blurb: 'Comes with Geepus. Works on any Mac, fully offline.' },
+  ollama: { label: 'Bigger local brain (Ollama)', blurb: 'Smarter answers, still 100% private on this Mac.' },
+  openrouter: { label: 'Cloud brain (developer testing only)', blurb: 'Sends questions to the internet — not private. For development.' },
+};
 
 export function PermissionsPanel() {
-  const [notificationStatus, setNotificationStatus] = useState<'unknown' | 'granted' | 'unsupported'>('unknown');
+  const [notificationStatus, setNotificationStatus] = useState<'idle' | 'sent'>('idle');
+  const [providers, setProviders] = useState<ProviderStatus[]>([]);
+  const [activeProvider, setActiveProvider] = useState<ProviderId>('bundled');
+  const [developerEnabled, setDeveloperEnabled] = useState(false);
+
+  useEffect(() => {
+    void window.geepus.models.listProviders().then(setProviders);
+    void window.geepus.settings.get().then((s) => {
+      setActiveProvider(s.activeProvider);
+      setDeveloperEnabled(s.developer.enabled);
+    });
+  }, []);
 
   async function requestNotifications() {
-    const granted = await window.geepus.setup.requestNotificationPermission();
-    setNotificationStatus(granted ? 'granted' : 'unsupported');
+    await window.geepus.setup.requestNotificationPermission();
+    setNotificationStatus('sent');
   }
 
+  async function switchBrain(next: ProviderId) {
+    const settings = await window.geepus.settings.update({ activeProvider: next });
+    setActiveProvider(settings.activeProvider);
+  }
+
+  const visibleBrains = providers.filter((p) => p.id !== 'openrouter' || developerEnabled);
+
   return (
-    <div className="permissions-panel">
-      <h2>Permissions</h2>
-      <p className="hint">Geepus asks for each of these only when it's actually needed — never all at once.</p>
+    <div className="panel">
+      <div className="panel-header">
+        <h2>Settings</h2>
+        <p className="muted">Everything Geepus knows and does stays on this Mac. Nothing is sent anywhere.</p>
+      </div>
 
-      <section className="permission-item">
+      <div className="card">
         <h3>Notifications</h3>
-        <p>Used for your daily brief and urgent inbox items. Requested once, up front.</p>
+        <p className="muted">A heads-up for your daily summary and anything urgent.</p>
         <button onClick={() => void requestNotifications()}>
-          {notificationStatus === 'granted' ? 'Notification sent ✓' : 'Send a test notification'}
+          {notificationStatus === 'sent' ? 'Test notification sent ✓' : 'Send a test notification'}
         </button>
-      </section>
+      </div>
 
-      {DEFERRED_PERMISSIONS.map((p) => (
-        <section key={p.name} className="permission-item">
-          <h3>{p.name}</h3>
-          <p>{p.description}</p>
-          <p className="hint">{p.when}</p>
-        </section>
-      ))}
+      <MailSetupPanel />
+
+      <div className="card">
+        <h3>Things Geepus remembers</h3>
+        <MemoryBrowser />
+      </div>
+
+      <div className="card">
+        <h3>Privacy, in plain words</h3>
+        <ul className="plain-list">
+          <li>Geepus asks before doing anything sensitive — saving files outside its folder, running commands, buying anything.</li>
+          <li>Email access is read-only. Sending or deleting mail isn't just off — it isn't built in.</li>
+          <li>It only asks for new access (email, browser, folders) the first time a thing actually needs it.</li>
+        </ul>
+      </div>
+
+      <details className="advanced card">
+        <summary>Advanced</summary>
+        <h3>Which brain is Geepus using?</h3>
+        <p className="muted">You don't need to touch this — Geepus picked the best option during setup.</p>
+        {visibleBrains.map((p) => {
+          const info = BRAIN_LABELS[p.id];
+          return (
+            <label key={p.id} className={`brain-choice ${p.available ? '' : 'unavailable'}`}>
+              <input
+                type="radio"
+                name="brain"
+                checked={activeProvider === p.id}
+                disabled={!p.available}
+                onChange={() => void switchBrain(p.id)}
+              />
+              <span>
+                <strong>{info.label}</strong>
+                {!p.available && ' (not available right now)'}
+                <br />
+                <span className="muted">{info.blurb}</span>
+              </span>
+            </label>
+          );
+        })}
+      </details>
     </div>
   );
 }

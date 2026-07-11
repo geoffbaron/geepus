@@ -42,6 +42,7 @@ export function registerRuntimeIpc(): void {
         budgets: request.budgets,
         auditLog,
         memory,
+        history: request.history,
       })) {
         event.sender.send(channel, agentEvent);
       }

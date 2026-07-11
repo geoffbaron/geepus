@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { MemoryEntry } from '@shared/memory';
 
+/** "Things Geepus remembers" — teach it facts, see what it knows, make it forget. */
 export function MemoryBrowser() {
   const [entries, setEntries] = useState<MemoryEntry[]>([]);
   const [newNote, setNewNote] = useState('');
@@ -19,6 +20,7 @@ export function MemoryBrowser() {
     if (!text) return;
     await window.geepus.memory.remember(text);
     setNewNote('');
+    setStatus('Got it — remembered.');
     await refresh();
   }
 
@@ -27,41 +29,43 @@ export function MemoryBrowser() {
     await refresh();
   }
 
-  async function runConsolidate() {
+  async function tidyUp() {
     const reports = await window.geepus.memory.consolidate();
     const removed = reports.reduce((sum, r) => sum + r.duplicatesRemoved, 0);
-    setStatus(`Consolidated — removed ${removed} duplicate${removed === 1 ? '' : 's'}.`);
+    setStatus(removed > 0 ? `Tidied up — removed ${removed} duplicate${removed === 1 ? '' : 's'}.` : 'All tidy already.');
     await refresh();
   }
 
   return (
-    <div className="memory-browser">
-      <div className="composer">
+    <div className="memory-section">
+      <div className="field-row">
         <input
           value={newNote}
           onChange={(e) => setNewNote(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === 'Enter') void addNote();
           }}
-          placeholder="Teach Geepus something…"
+          placeholder='Tell Geepus something to remember, e.g. "My sister’s birthday is March 12"'
         />
-        <button onClick={() => void addNote()} disabled={!newNote.trim()}>
+        <button className="primary" onClick={() => void addNote()} disabled={!newNote.trim()}>
           Remember
         </button>
-        <button onClick={() => void runConsolidate()}>Consolidate</button>
       </div>
-      {status && <p className="hint">{status}</p>}
+      {status && <p className="muted">{status}</p>}
 
-      <div className="memory-entries">
-        {entries.length === 0 && <p className="hint">Nothing remembered yet.</p>}
-        {entries.map((entry) => (
-          <div key={`${entry.namespace}:${entry.id}`} className="memory-entry">
-            <span className="pill">{String(entry.metadata['type'] ?? entry.namespace)}</span>
-            <p>{entry.text}</p>
-            <button onClick={() => void deleteEntry(entry.namespace, entry.id)}>Delete</button>
-          </div>
-        ))}
-      </div>
+      {entries.length === 0 && <p className="muted">Nothing here yet — anything you teach Geepus shows up here.</p>}
+      {entries.map((entry) => (
+        <div key={`${entry.namespace}:${entry.id}`} className="memory-entry">
+          <p>{entry.text}</p>
+          <button onClick={() => void deleteEntry(entry.namespace, entry.id)}>Forget</button>
+        </div>
+      ))}
+
+      {entries.length > 1 && (
+        <button className="subtle-action" onClick={() => void tidyUp()}>
+          Tidy up duplicates
+        </button>
+      )}
     </div>
   );
 }

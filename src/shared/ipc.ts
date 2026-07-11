@@ -24,6 +24,9 @@ export interface DownloadProgress {
 export interface IpcApi {
   app: {
     getVersion: () => Promise<string>;
+    /** Opens a help page in the user's real browser. Main enforces a strict URL
+     * allowlist (mail app-password pages only) — returns false for anything else. */
+    openHelpLink: (url: string) => Promise<boolean>;
   };
   models: {
     listProviders: () => Promise<ProviderStatus[]>;

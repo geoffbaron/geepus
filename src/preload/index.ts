@@ -6,6 +6,7 @@ import type { AgentEvent, PendingApproval } from '@shared/agent';
 const geepus: IpcApi = {
   app: {
     getVersion: () => ipcRenderer.invoke('app.getVersion'),
+    openHelpLink: (url) => ipcRenderer.invoke('app.openHelpLink', url),
   },
   models: {
     listProviders: () => ipcRenderer.invoke('models.listProviders'),

@@ -3,6 +3,11 @@ import type { OllamaPullProgress } from '@shared/model';
 import type { DiscoveryReport, MachineProfile, Recommendation, SetupPlan } from '@shared/setup';
 import { askOnce } from '../lib/askOnce';
 
+/**
+ * First-run setup, written for someone's dad: no "Ollama", no "LLM", no "runtime" in the
+ * headline copy — Geepus talks about "brains" and does the technical work silently.
+ * The actual model/runtime names stay available under a "curious?" disclosure.
+ */
 type Stage = 'probing' | 'path' | 'busy' | 'permissions';
 
 function formatPct(done: number, total: number): number {
@@ -42,22 +47,22 @@ export function Onboarding({ onComplete }: { onComplete: () => void }) {
     if (!profile || !plan) return;
     try {
       const text = await askOnce(
-        `In two short, friendly sentences, welcome the user to Geepus and briefly explain what just happened during setup. Context: ${summary}`,
-        'You are Geepus, a friendly local-only digital assistant. Keep it warm, brief, and concrete — no fluff.',
+        `In two short, friendly sentences, welcome me to Geepus and briefly explain what just happened during setup. Address me directly as "you" — never say "the user". No technical jargon — say "brain", not "model" or "Ollama". Context: ${summary}`,
+        'You are Geepus, a friendly personal assistant that lives on this person\'s own computer. Speak to them directly. Keep it warm, brief, and concrete — no fluff, no jargon.',
       );
       setVoiceMessage(text.trim());
     } catch {
-      setVoiceMessage(summary);
+      setVoiceMessage("You're all set up. Ask me anything!");
     }
   }
 
   async function runPathA() {
     if (!suitableModel) return;
     setStage('busy');
-    setBusyLabel(`Using ${suitableModel.name}…`);
+    setBusyLabel('Connecting things up…');
     try {
       await window.geepus.setup.adoptOllamaModel(suitableModel.name);
-      void speakWelcome(`Adopted the already-installed Ollama model ${suitableModel.name}.`);
+      void speakWelcome(`Found a capable brain already on this computer and connected to it.`);
       setStage('permissions');
     } catch (err) {
       setError((err as Error).message);
@@ -69,16 +74,15 @@ export function Onboarding({ onComplete }: { onComplete: () => void }) {
     const tag = recommendation?.chatModel?.ollamaTag;
     if (!tag) return;
     setStage('busy');
-    setBusyLabel(`Downloading ${tag}…`);
+    setBusyLabel('Downloading the smarter brain…');
     setBusyPct(0);
     const unsubscribe = window.geepus.setup.pullModel(tag, (progress: OllamaPullProgress) => {
-      setBusyLabel(progress.status);
       if (progress.totalBytes) setBusyPct(formatPct(progress.completedBytes ?? 0, progress.totalBytes));
     });
     try {
       await new Promise((resolve) => setTimeout(resolve, 0)); // let the subscription attach first
       await window.geepus.setup.adoptOllamaModel(tag);
-      void speakWelcome(`Downloaded and started using ${tag}.`);
+      void speakWelcome('Downloaded a brain that fits this computer nicely.');
       setStage('permissions');
     } catch (err) {
       setError((err as Error).message);
@@ -91,10 +95,10 @@ export function Onboarding({ onComplete }: { onComplete: () => void }) {
 
   async function runUseBundled() {
     setStage('busy');
-    setBusyLabel('Switching to the built-in brain…');
+    setBusyLabel('Almost there…');
     try {
       await window.geepus.setup.useBundled();
-      void speakWelcome('Switched to the built-in tiny local model — no extra downloads needed right now.');
+      void speakWelcome('Using the built-in brain — ready right away, nothing to download.');
       setStage('permissions');
     } catch (err) {
       setError((err as Error).message);
@@ -106,21 +110,20 @@ export function Onboarding({ onComplete }: { onComplete: () => void }) {
     setStage('busy');
     setError(null);
     try {
-      setBusyLabel('Downloading Ollama…');
+      setBusyLabel('Setting things up — this takes a few minutes…');
       setBusyPct(0);
       await window.geepus.setup.installOllama((progress) => setBusyPct(formatPct(progress.downloadedBytes, progress.totalBytes)));
 
-      setBusyLabel('Starting Ollama…');
+      setBusyLabel('Starting things up…');
       setBusyPct(null);
       const launched = await window.geepus.setup.launchOllama();
-      if (!launched) throw new Error('Ollama installed, but its server did not start in time.');
+      if (!launched) throw new Error("Something didn't start in time. It's safe to just try again.");
 
       const tag = recommendation?.chatModel?.ollamaTag;
       if (tag) {
-        setBusyLabel(`Downloading ${tag}…`);
+        setBusyLabel('Downloading the brain — the big part, almost done…');
         setBusyPct(0);
         const unsubscribe = window.geepus.setup.pullModel(tag, (progress) => {
-          setBusyLabel(progress.status);
           if (progress.totalBytes) setBusyPct(formatPct(progress.completedBytes ?? 0, progress.totalBytes));
         });
         try {
@@ -129,7 +132,7 @@ export function Onboarding({ onComplete }: { onComplete: () => void }) {
           unsubscribe();
         }
       }
-      void speakWelcome('Installed Ollama and downloaded a model that fits this machine.');
+      void speakWelcome('Set everything up automatically, including a brain that fits this computer.');
       setStage('permissions');
     } catch (err) {
       setError((err as Error).message);
@@ -151,17 +154,27 @@ export function Onboarding({ onComplete }: { onComplete: () => void }) {
 
   if (stage === 'probing') {
     return (
-      <div className="onboarding">
-        <p className="hint">Looking at your machine…</p>
+      <div className="onboarding centered">
+        <div className="welcome-orb" aria-hidden />
+        <h1>Hi, I'm Geepus.</h1>
+        <p className="muted">
+          <span className="spinner" /> Taking a quick look at your computer…
+        </p>
       </div>
     );
   }
 
   if (stage === 'busy') {
     return (
-      <div className="onboarding">
+      <div className="onboarding centered">
+        <div className="welcome-orb" aria-hidden />
         <p>{busyLabel}</p>
-        {busyPct !== null && <div className="download-bar">{busyPct}%</div>}
+        {busyPct !== null && (
+          <div className="progress">
+            <div className="progress-fill" style={{ width: `${busyPct}%` }} />
+          </div>
+        )}
+        {busyPct !== null && <p className="muted">{busyPct}%</p>}
       </div>
     );
   }
@@ -170,20 +183,21 @@ export function Onboarding({ onComplete }: { onComplete: () => void }) {
     return (
       <div className="onboarding">
         {voiceMessage && (
-          <div className="message assistant">
-            <strong>geepus</strong>
+          <div className="bubble assistant standalone">
             <p>{voiceMessage}</p>
           </div>
         )}
-        <h2>One quick thing</h2>
+        <h2>One last thing</h2>
         <p>
-          Geepus will ask for anything else (email, browser, folders) only the first time it's actually needed. For
-          now, it'd like permission to notify you about your daily brief and anything urgent.
+          Can Geepus send you a notification when your daily summary is ready, or when something looks urgent?
+          That's the only permission it wants up front — anything else, it'll ask about when it comes up.
         </p>
         <button onClick={() => void sendTestNotification()}>
-          {notificationStatus === 'sent' ? 'Notification sent ✓' : 'Allow notifications'}
+          {notificationStatus === 'sent' ? 'Notification sent ✓' : 'Yes, allow notifications'}
         </button>
-        <button onClick={() => void finish()}>Start using Geepus</button>
+        <button className="primary big" onClick={() => void finish()}>
+          Start using Geepus
+        </button>
       </div>
     );
   }
@@ -191,47 +205,89 @@ export function Onboarding({ onComplete }: { onComplete: () => void }) {
   // stage === 'path'
   return (
     <div className="onboarding">
-      <h1>Welcome to Geepus</h1>
-      {profile && (
-        <p className="hint">
-          {profile.chip} · {profile.ramGb}GB RAM · {profile.osVersion}
-        </p>
-      )}
-      {error && <p className="error">⚠️ {error}</p>}
+      <div className="welcome-orb" aria-hidden />
+      <h1>Hi, I'm Geepus.</h1>
+      <p>
+        I'm a personal assistant that lives entirely on this Mac — private by design. Let's get you set up; it only
+        takes a minute.
+      </p>
+      {error && <p className="problem">⚠️ {error}</p>}
 
       {plan?.path === 'A' && suitableModel && (
-        <div className="path-card">
-          <p>I found Ollama already running with <strong>{suitableModel.name}</strong> installed — that's a great fit for this machine.</p>
-          <button onClick={() => void runPathA()}>Use {suitableModel.name}</button>
+        <div className="card">
+          <p>
+            <strong>Good news:</strong> your computer already has everything I need. You're ready to go.
+          </p>
+          <button className="primary big" onClick={() => void runPathA()}>
+            Sounds good — let's go
+          </button>
+          <details className="advanced">
+            <summary>Curious what I found?</summary>
+            <p className="muted">
+              An Ollama server is already running with the model "{suitableModel.name}" (~{suitableModel.sizeGb}GB) —
+              a good fit for your {profile?.ramGb}GB of memory.
+            </p>
+          </details>
         </div>
       )}
 
       {plan?.path === 'B' && (
-        <div className="path-card">
+        <div className="card">
           <p>
-            I found Ollama, but no model that fits yet. I'd recommend{' '}
-            <strong>{recommendation?.chatModel?.ollamaTag}</strong> (~{recommendation?.chatModel?.sizeGb}GB).
+            Your computer can run a <strong>smarter brain</strong> than what's on it right now. I can download one
+            (about {recommendation?.chatModel?.sizeGb}GB — a few minutes) — or you can start right away with my
+            built-in one and upgrade later.
           </p>
-          <button onClick={() => void runPathB()}>Download it</button>
-          <button onClick={() => void runUseBundled()}>Use the built-in brain instead</button>
+          <button className="primary big" onClick={() => void runPathB()}>
+            Download the smarter brain
+          </button>
+          <button onClick={() => void runUseBundled()}>Start right away instead</button>
+          <details className="advanced">
+            <summary>Curious about the details?</summary>
+            <p className="muted">
+              Ollama is installed but has no chat model that fits. The recommendation is{' '}
+              {recommendation?.chatModel?.ollamaTag} for this machine's {profile?.ramGb}GB of memory.
+            </p>
+          </details>
         </div>
       )}
 
       {plan?.path === 'C' && (
-        <div className="path-card">
-          <p>I didn't find a local LLM runtime on this machine yet. You've got two easy options:</p>
-          <button onClick={() => void runInstallOllama()}>Install Ollama for me</button>
-          <button onClick={() => void runUseBundled()}>Just use the built-in brain</button>
+        <div className="card">
+          <p>
+            Two ways to go, both easy: I can <strong>set everything up for you</strong> (takes a few minutes,
+            gets you the smartest setup) — or you can <strong>start right now</strong> with my built-in brain.
+          </p>
+          <button className="primary big" onClick={() => void runInstallOllama()}>
+            Set it up for me
+          </button>
+          <button onClick={() => void runUseBundled()}>Start right now</button>
+          <details className="advanced">
+            <summary>Curious what "set it up" means?</summary>
+            <p className="muted">
+              It installs Ollama (a free, private program for running AI on your own computer) and downloads{' '}
+              {recommendation?.chatModel?.ollamaTag ?? 'a model'} sized for this machine. Nothing leaves your Mac.
+            </p>
+          </details>
         </div>
       )}
 
       {plan?.path === 'D' && (
-        <div className="path-card">
+        <div className="card">
           <p>
-            This machine has {profile?.ramGb}GB of RAM, below what's needed to run bigger local models comfortably.
-            Geepus will use its built-in tiny brain — it's small, fast, and works offline right away.
+            I'll use my <strong>built-in brain</strong> on this computer — it's quick, works offline, and is ready
+            right now.
           </p>
-          <button onClick={() => void runUseBundled()}>Continue</button>
+          <button className="primary big" onClick={() => void runUseBundled()}>
+            Continue
+          </button>
+          <details className="advanced">
+            <summary>Curious why?</summary>
+            <p className="muted">
+              This machine has {profile?.ramGb}GB of memory — below the comfortable minimum for larger local models,
+              so the small bundled one is the reliable choice.
+            </p>
+          </details>
         </div>
       )}
     </div>

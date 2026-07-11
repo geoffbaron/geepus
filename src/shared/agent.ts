@@ -46,6 +46,9 @@ export interface RunRequest {
   objective: string;
   workspaceRoot: string;
   budgets?: Partial<RunBudgets>;
+  /** Prior user/assistant turns of the same conversation — lets the chat surface drive
+   * the full agent runtime (one Jarvis-style conversation) without losing context. */
+  history?: ChatMessage[];
 }
 
 export interface RunResult {

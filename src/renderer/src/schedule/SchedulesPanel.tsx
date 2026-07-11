@@ -1,11 +1,27 @@
 import { useEffect, useState } from 'react';
 import type { ScheduledTask } from '@shared/schedule';
+import { scheduleLabel, whenLabel } from '../lib/friendly';
+
+/** "Routines" — things Geepus does for you on its own, described in plain language. */
+
+const WHEN_CHOICES = [
+  { value: '0 8 * * *', label: 'Every morning at 8' },
+  { value: '0 18 * * *', label: 'Every evening at 6' },
+  { value: 'every 1h', label: 'Every hour' },
+  { value: 'every 30m', label: 'Every 30 minutes' },
+];
+
+function lastRunLabel(state: string): { text: string; ok: boolean } | null {
+  if (state === 'completed') return { text: 'Last run went fine', ok: true };
+  if (state === 'failed') return { text: 'Had trouble last time', ok: false };
+  if (state === 'running') return { text: 'Running right now…', ok: true };
+  return null;
+}
 
 export function SchedulesPanel() {
   const [tasks, setTasks] = useState<ScheduledTask[]>([]);
-  const [name, setName] = useState('');
   const [objective, setObjective] = useState('');
-  const [schedule, setSchedule] = useState('every 30m');
+  const [schedule, setSchedule] = useState('0 8 * * *');
 
   async function refresh() {
     setTasks(await window.geepus.schedule.list());
@@ -17,8 +33,7 @@ export function SchedulesPanel() {
 
   async function addTask() {
     if (!objective.trim()) return;
-    await window.geepus.schedule.add({ name: name.trim() || undefined, objective: objective.trim(), schedule });
-    setName('');
+    await window.geepus.schedule.add({ objective: objective.trim(), schedule });
     setObjective('');
     await refresh();
   }
@@ -39,42 +54,61 @@ export function SchedulesPanel() {
   }
 
   return (
-    <div className="schedules-panel">
-      <div className="schedule-form">
-        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Name (optional)" />
-        <input value={objective} onChange={(e) => setObjective(e.target.value)} placeholder="Objective…" />
-        <select value={schedule} onChange={(e) => setSchedule(e.target.value)}>
-          <option value="every 30m">Every 30 min</option>
-          <option value="every 1h">Every hour</option>
-          <option value="0 8 * * *">Daily at 8am</option>
-          <option value="loop">Loop continuously</option>
-        </select>
-        <button onClick={() => void addTask()} disabled={!objective.trim()}>
-          Add
+    <div className="panel">
+      <div className="panel-header">
+        <h2>Routines</h2>
+        <p className="muted">Things Geepus takes care of on its own, on a schedule you pick.</p>
+      </div>
+
+      <div className="card">
+        <h3>Add a routine</h3>
+        <label className="field">
+          <span>What should Geepus do?</span>
+          <input
+            value={objective}
+            onChange={(e) => setObjective(e.target.value)}
+            placeholder='e.g. "Check my inbox and let me know if anything looks urgent"'
+          />
+        </label>
+        <label className="field">
+          <span>How often?</span>
+          <select value={schedule} onChange={(e) => setSchedule(e.target.value)}>
+            {WHEN_CHOICES.map((c) => (
+              <option key={c.value} value={c.value}>
+                {c.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <button className="primary" onClick={() => void addTask()} disabled={!objective.trim()}>
+          Add routine
         </button>
       </div>
 
-      <div className="schedule-list">
-        {tasks.length === 0 && <p className="hint">No scheduled tasks yet.</p>}
-        {tasks.map((task) => (
-          <div key={task.id} className="schedule-item">
-            <div className="schedule-item-main">
-              <strong>{task.name}</strong>
-              <span className="pill">{task.schedule}</span>
-              {task.lastRunState && <span className={`pill status-${task.lastRunState}`}>{task.lastRunState}</span>}
-            </div>
-            <p>{task.objective}</p>
-            <p className="hint">
-              {task.nextRunAt ? `Next: ${new Date(task.nextRunAt).toLocaleString()}` : 'Not scheduled'}
+      {tasks.length === 0 && (
+        <p className="muted center">No routines yet — add one above, and Geepus will handle it from there.</p>
+      )}
+      {tasks.map((task) => {
+        const last = lastRunLabel(task.lastRunState);
+        return (
+          <div key={task.id} className={`card routine ${task.enabled ? '' : 'paused'}`}>
+            <p className="routine-objective">{task.objective}</p>
+            <p className="muted">
+              {scheduleLabel(task.schedule)}
+              {!task.enabled && ' · Paused'}
+              {task.enabled && task.nextRunAt ? ` · Next: ${whenLabel(new Date(task.nextRunAt).getTime())}` : ''}
             </p>
-            <div className="schedule-actions">
+            {last && <p className={last.ok ? 'muted' : 'problem'}>{last.text}</p>}
+            <div className="row-actions">
               <button onClick={() => void runNow(task.id)}>Run now</button>
-              <button onClick={() => void toggle(task)}>{task.enabled ? 'Disable' : 'Enable'}</button>
-              <button onClick={() => void remove(task.id)}>Delete</button>
+              <button onClick={() => void toggle(task)}>{task.enabled ? 'Pause' : 'Resume'}</button>
+              <button className="danger" onClick={() => void remove(task.id)}>
+                Remove
+              </button>
             </div>
           </div>
-        ))}
-      </div>
+        );
+      })}
     </div>
   );
 }
