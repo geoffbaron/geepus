@@ -33,6 +33,23 @@ export const SettingsSchema = z.object({
       openrouterModel: z.string().default('openai/gpt-4o-mini'),
     })
     .default({}),
+  /** IMAP app-password itself lives in secrets.bin, never here (PLAN.md §9). */
+  mail: z
+    .object({
+      enabled: z.boolean().default(false),
+      host: z.string().default(''),
+      port: z.number().default(993),
+      secure: z.boolean().default(true),
+      user: z.string().default(''),
+    })
+    .default({}),
+  /** Used only for the Daily Brief's weather section — null skips it entirely. */
+  brief: z
+    .object({
+      latitude: z.number().nullable().default(null),
+      longitude: z.number().nullable().default(null),
+    })
+    .default({}),
 });
 
 export type Settings = z.infer<typeof SettingsSchema>;

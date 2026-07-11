@@ -4,9 +4,11 @@ import { Chat } from './chat/Chat';
 import { AgentRunner } from './agent/AgentRunner';
 import { ApprovalsInbox } from './agent/ApprovalsInbox';
 import { MemoryBrowser } from './memory/MemoryBrowser';
+import { SchedulesPanel } from './schedule/SchedulesPanel';
+import { BriefPanel } from './brief/BriefPanel';
 import { PermissionsPanel } from './settings/PermissionsPanel';
 
-type View = 'chat' | 'agent' | 'approvals' | 'memory' | 'permissions';
+type View = 'chat' | 'agent' | 'approvals' | 'memory' | 'schedules' | 'brief' | 'permissions';
 
 export function App() {
   const [onboardingComplete, setOnboardingComplete] = useState<boolean | null>(null);
@@ -22,6 +24,8 @@ export function App() {
   const views: Array<{ id: View; label: string }> = [
     { id: 'chat', label: 'Chat' },
     { id: 'agent', label: 'Agent' },
+    { id: 'brief', label: 'Brief' },
+    { id: 'schedules', label: 'Schedules' },
     { id: 'approvals', label: 'Approvals' },
     { id: 'memory', label: 'Memory' },
     { id: 'permissions', label: 'Permissions' },
@@ -38,6 +42,8 @@ export function App() {
       </nav>
       {view === 'chat' && <Chat />}
       {view === 'agent' && <AgentRunner />}
+      {view === 'brief' && <BriefPanel />}
+      {view === 'schedules' && <SchedulesPanel />}
       {view === 'approvals' && <ApprovalsInbox />}
       {view === 'memory' && <MemoryBrowser />}
       {view === 'permissions' && <PermissionsPanel />}

@@ -304,3 +304,160 @@ body {
   cursor: pointer;
   flex-shrink: 0;
 }
+
+/* Schedules */
+
+.schedules-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  min-height: 0;
+}
+
+.schedule-form {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.schedule-form input {
+  flex: 1;
+  min-width: 120px;
+  padding: 0.5rem;
+  border-radius: 6px;
+  border: 1px solid color-mix(in srgb, currentColor 25%, transparent);
+  background: transparent;
+  color: inherit;
+}
+
+.schedule-form select,
+.schedule-form button {
+  padding: 0.5rem;
+  border-radius: 6px;
+  border: none;
+  cursor: pointer;
+}
+
+.schedule-list {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.schedule-item {
+  padding: 0.75rem;
+  border-radius: 8px;
+  background: color-mix(in srgb, currentColor 5%, transparent);
+}
+
+.schedule-item-main {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.schedule-item p {
+  margin: 0.3rem 0;
+  font-size: 0.85rem;
+}
+
+.schedule-actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.4rem;
+}
+
+.schedule-actions button {
+  padding: 0.3rem 0.7rem;
+  border-radius: 6px;
+  border: none;
+  cursor: pointer;
+}
+
+/* Brief */
+
+.brief-panel {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.brief-panel > button {
+  align-self: flex-start;
+  padding: 0.5rem 1rem;
+  border-radius: 6px;
+  border: none;
+  cursor: pointer;
+}
+
+.brief-text {
+  white-space: pre-wrap;
+  padding: 1rem;
+  border-radius: 8px;
+  background: color-mix(in srgb, currentColor 5%, transparent);
+  font-family: inherit;
+}
+
+.suggestion-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.suggestion-actions button {
+  align-self: flex-start;
+  padding: 0.4rem 0.8rem;
+  border-radius: 6px;
+  border: none;
+  cursor: pointer;
+}
+
+/* Mail setup */
+
+.mail-setup {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.75rem;
+  border-radius: 8px;
+  background: color-mix(in srgb, currentColor 5%, transparent);
+}
+
+.mail-setup input {
+  padding: 0.5rem;
+  border-radius: 6px;
+  border: 1px solid color-mix(in srgb, currentColor 25%, transparent);
+  background: transparent;
+  color: inherit;
+}
+
+.mail-provider-select {
+  display: flex;
+  gap: 0.4rem;
+}
+
+.mail-provider-select button {
+  padding: 0.3rem 0.7rem;
+  border-radius: 6px;
+  border: none;
+  cursor: pointer;
+  opacity: 0.6;
+}
+
+.mail-provider-select button.active {
+  opacity: 1;
+  background: color-mix(in srgb, currentColor 15%, transparent);
+}
+
+.mail-setup > button {
+  align-self: flex-start;
+  padding: 0.5rem 1rem;
+  border-radius: 6px;
+  border: none;
+  cursor: pointer;
+}

@@ -11,6 +11,9 @@ import type { Settings } from './settings';
 import type { DiscoveryReport, InstallOllamaResult, MachineProfile, Recommendation, SetupPlan } from './setup';
 import type { AgentEvent, PendingApproval, RunRequest } from './agent';
 import type { ConsolidationReport, MemoryEntry } from './memory';
+import type { FileWatchTrigger, FileWatchTriggerInput, ScheduledTask, ScheduledTaskInput } from './schedule';
+import type { ImapConnectionTestResult, InboxRunResult, MailAccountInput } from './mail';
+import type { DailyBrief } from './brief';
 
 export interface DownloadProgress {
   downloadedBytes: number;
@@ -56,6 +59,25 @@ export interface IpcApi {
     remember: (text: string) => Promise<void>;
     forget: (namespace: string, id: string) => Promise<boolean>;
     consolidate: () => Promise<ConsolidationReport[]>;
+  };
+  schedule: {
+    list: () => Promise<ScheduledTask[]>;
+    add: (input: ScheduledTaskInput) => Promise<ScheduledTask>;
+    update: (id: string, patch: Partial<ScheduledTaskInput>) => Promise<ScheduledTask>;
+    remove: (id: string) => Promise<ScheduledTask>;
+    runNow: (id: string) => Promise<ScheduledTask>;
+    listTriggers: () => Promise<FileWatchTrigger[]>;
+    addTrigger: (input: FileWatchTriggerInput) => Promise<FileWatchTrigger>;
+    removeTrigger: (id: string) => Promise<FileWatchTrigger>;
+  };
+  mail: {
+    testConnection: (config: MailAccountInput) => Promise<ImapConnectionTestResult>;
+    saveAccount: (config: MailAccountInput) => Promise<void>;
+    isConfigured: () => Promise<boolean>;
+    runInboxNow: () => Promise<InboxRunResult>;
+  };
+  brief: {
+    generate: () => Promise<DailyBrief>;
   };
 }
 

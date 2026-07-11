@@ -76,6 +76,25 @@ const geepus: IpcApi = {
     forget: (namespace, id) => ipcRenderer.invoke('memory.forget', namespace, id),
     consolidate: () => ipcRenderer.invoke('memory.consolidate'),
   },
+  schedule: {
+    list: () => ipcRenderer.invoke('schedule.list'),
+    add: (input) => ipcRenderer.invoke('schedule.add', input),
+    update: (id, patch) => ipcRenderer.invoke('schedule.update', id, patch),
+    remove: (id) => ipcRenderer.invoke('schedule.remove', id),
+    runNow: (id) => ipcRenderer.invoke('schedule.runNow', id),
+    listTriggers: () => ipcRenderer.invoke('schedule.listTriggers'),
+    addTrigger: (input) => ipcRenderer.invoke('schedule.addTrigger', input),
+    removeTrigger: (id) => ipcRenderer.invoke('schedule.removeTrigger', id),
+  },
+  mail: {
+    testConnection: (config) => ipcRenderer.invoke('mail.testConnection', config),
+    saveAccount: (config) => ipcRenderer.invoke('mail.saveAccount', config),
+    isConfigured: () => ipcRenderer.invoke('mail.isConfigured'),
+    runInboxNow: () => ipcRenderer.invoke('mail.runInboxNow'),
+  },
+  brief: {
+    generate: () => ipcRenderer.invoke('brief.generate'),
+  },
 };
 
 contextBridge.exposeInMainWorld('geepus', geepus);

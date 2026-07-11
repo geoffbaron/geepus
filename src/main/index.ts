@@ -4,6 +4,7 @@ import { pathToFileURL } from 'node:url';
 import { is } from './util/env';
 import { registerIpcHandlers } from './ipc';
 import { bootstrapBundledModel } from './models/bootstrap';
+import { startSchedulerAndTriggers, stopSchedulerAndTriggers } from './schedule/instance';
 
 process.on('uncaughtException', (err) => {
   console.error('[Geepus] Uncaught exception:', err);
@@ -87,6 +88,8 @@ app.whenReady().then(() => {
     win.webContents.send('models.bundledDownloadProgress', { downloadedBytes, totalBytes });
   });
 
+  void startSchedulerAndTriggers();
+
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
@@ -94,4 +97,8 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
+});
+
+app.on('will-quit', () => {
+  stopSchedulerAndTriggers();
 });

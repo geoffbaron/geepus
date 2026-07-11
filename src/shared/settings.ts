@@ -11,4 +11,6 @@ export interface Settings {
   ollama: { baseUrl: string; model: string };
   bundled: { modelFilename: string };
   developer: { enabled: boolean; openrouterModel: string };
+  mail: { enabled: boolean; host: string; port: number; secure: boolean; user: string };
+  brief: { latitude: number | null; longitude: number | null };
 }

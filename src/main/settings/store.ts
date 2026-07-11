@@ -20,6 +20,7 @@ export async function saveSettings(userDataDir: string, settings: Settings): Pro
 /** Secrets never touch settings.json — encrypted at rest via the OS keychain (PLAN.md §9). */
 export interface Secrets {
   openrouterApiKey?: string;
+  imapPassword?: string;
 }
 
 export async function loadSecrets(userDataDir: string): Promise<Secrets> {
