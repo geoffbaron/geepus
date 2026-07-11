@@ -16,9 +16,22 @@ Grab the latest DMG and drag Geepus into Applications. There are two variants:
   happen once.
 
 Since these builds aren't yet signed with an Apple Developer ID (see [Known
-limitations](#known-limitations)), macOS Gatekeeper will refuse to open the app with a
-normal double-click. Instead: **right-click Geepus.app → Open → Open** (only needed the
-first time).
+limitations](#known-limitations)), macOS will refuse to open the app and say
+**"Geepus is damaged and can't be opened"** — it isn't damaged; that's just how recent
+macOS versions phrase "this app isn't signed." The fix takes one command:
+
+1. Drag **Geepus** from the DMG into **Applications** first.
+2. Open **Terminal** (press ⌘-Space, type "Terminal", press Return).
+3. Copy-paste this line and press Return:
+
+   ```
+   xattr -cr /Applications/Geepus.app
+   ```
+
+4. Open Geepus normally. You only ever have to do this once.
+
+(On older macOS versions, right-click → Open → Open may work instead, but the command
+above works everywhere.)
 
 ## First run
 
@@ -60,9 +73,11 @@ during development; it's off by default and never surfaced during setup.
 
 ## Known limitations
 
-- **Unsigned builds.** These DMGs aren't notarized with an Apple Developer ID yet, so
-  Gatekeeper will warn on first open (see [Installing](#installing) for the workaround).
-  Once a Developer ID is available this goes away.
+- **Unsigned builds.** These DMGs aren't signed/notarized with an Apple Developer ID
+  yet, so macOS claims the app is "damaged" on first open (see
+  [Installing](#installing) for the one-command fix). Once a Developer ID is available
+  and the build is notarized, installs become a plain double-click and this section
+  disappears.
 - **macOS only, arm64 (Apple Silicon) first.** Intel Mac and Windows support are not yet
   built.
 - **Playwright's Chromium download** (lite variant) requires an internet connection the
