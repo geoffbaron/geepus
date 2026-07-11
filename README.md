@@ -92,3 +92,28 @@ npm run typecheck && npm run lint && npm run test
 npm run dist:lite     # unsigned DMG, first-run downloads
 npm run dist:full     # unsigned DMG, model + browser baked in for offline install
 ```
+
+### Signed + notarized builds (no Gatekeeper warnings)
+
+One-time setup on the build machine:
+
+1. Xcode → Settings → Accounts → select your team → Manage Certificates… → **+** →
+   **Developer ID Application** (requires a paid Apple Developer membership).
+2. Create an app-specific password at account.apple.com → Sign-In and Security →
+   App-Specific Passwords, then store it for notarytool (paste it when prompted):
+
+   ```
+   xcrun notarytool store-credentials geepus-notary \
+     --apple-id <your-apple-id> --team-id <your-team-id>
+   ```
+
+Then:
+
+```
+npm run dist:lite:signed
+npm run dist:full:signed
+```
+
+electron-builder auto-discovers the Developer ID certificate, signs with the hardened
+runtime + [entitlements](resources/entitlements.mac.plist), submits to Apple's notary
+service, and staples the ticket — the result installs with a plain double-click.

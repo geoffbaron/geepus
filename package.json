@@ -13,8 +13,10 @@
     "lint": "eslint . --max-warnings 0",
     "test": "vitest run",
     "verify:catalog": "node scripts/verify-catalog.mts",
-    "dist:lite": "npm run build && electron-builder --mac --config electron-builder.yml",
-    "dist:full": "node scripts/bake-full-bundle.mts && npm run build && electron-builder --mac --config electron-builder.full.yml"
+    "dist:lite": "npm run build && electron-builder --mac --config electron-builder.config.cjs",
+    "dist:full": "node scripts/bake-full-bundle.mts && npm run build && GEEPUS_VARIANT=full electron-builder --mac --config electron-builder.config.cjs",
+    "dist:lite:signed": "npm run build && GEEPUS_SIGN=1 APPLE_KEYCHAIN_PROFILE=${APPLE_KEYCHAIN_PROFILE:-geepus-notary} electron-builder --mac --config electron-builder.config.cjs",
+    "dist:full:signed": "node scripts/bake-full-bundle.mts && npm run build && GEEPUS_VARIANT=full GEEPUS_SIGN=1 APPLE_KEYCHAIN_PROFILE=${APPLE_KEYCHAIN_PROFILE:-geepus-notary} electron-builder --mac --config electron-builder.config.cjs"
   },
   "dependencies": {
     "imapflow": "^1.4.7",
