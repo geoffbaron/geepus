@@ -29,7 +29,7 @@ describe('determineSetupPath', () => {
       profile({ ramGb: 16 }),
       discovery({
         runtimes: [
-          { id: 'ollama', available: true, binaryFound: true, models: [{ name: 'llama3.2:3b', sizeGb: 2 }] },
+          { id: 'ollama', available: true, binaryFound: true, models: [{ name: 'llama3.2:3b', sizeGb: 2, chatCapable: true }] },
           { id: 'lmstudio', available: false, binaryFound: false, models: [] },
         ],
       }),
@@ -37,12 +37,30 @@ describe('determineSetupPath', () => {
     expect(plan.path).toBe('A');
   });
 
+  it('Path B: Ollama running but only an embedding-only model fits — never adopted as chat driver', () => {
+    const plan = determineSetupPath(
+      profile({ ramGb: 16 }),
+      discovery({
+        runtimes: [
+          {
+            id: 'ollama',
+            available: true,
+            binaryFound: true,
+            models: [{ name: 'nomic-embed-text:latest', sizeGb: 0.27, chatCapable: false }],
+          },
+          { id: 'lmstudio', available: false, binaryFound: false, models: [] },
+        ],
+      }),
+    );
+    expect(plan.path).toBe('B');
+  });
+
   it('Path B: Ollama running but only oversized models installed', () => {
     const plan = determineSetupPath(
       profile({ ramGb: 16 }),
       discovery({
         runtimes: [
-          { id: 'ollama', available: true, binaryFound: true, models: [{ name: 'huge:70b', sizeGb: 40 }] },
+          { id: 'ollama', available: true, binaryFound: true, models: [{ name: 'huge:70b', sizeGb: 40, chatCapable: true }] },
           { id: 'lmstudio', available: false, binaryFound: false, models: [] },
         ],
       }),
@@ -73,7 +91,7 @@ describe('determineSetupPath', () => {
       profile({ ramGb: 4, tier: 'minimal' }),
       discovery({
         runtimes: [
-          { id: 'ollama', available: true, binaryFound: true, models: [{ name: 'tiny:1b', sizeGb: 0.7 }] },
+          { id: 'ollama', available: true, binaryFound: true, models: [{ name: 'tiny:1b', sizeGb: 0.7, chatCapable: true }] },
           { id: 'lmstudio', available: false, binaryFound: false, models: [] },
         ],
       }),

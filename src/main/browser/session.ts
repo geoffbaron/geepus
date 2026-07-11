@@ -1,6 +1,7 @@
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { BrowserTarget } from '@shared/browser';
+import { getChromiumBootstrapError, isChromiumReady } from './bootstrap';
 
 // Lazy import — playwright ships a real Chromium download, so keep it out of the module
 // graph until a browser action is actually used.
@@ -60,6 +61,9 @@ export class BrowserSession {
   private async ensurePage(): Promise<Page> {
     if (this.page && !this.page.isClosed()) return this.page;
     if (!this.context) {
+      const bootstrapError = getChromiumBootstrapError();
+      if (bootstrapError) throw new Error(`browser unavailable: chromium install failed — ${bootstrapError}`);
+      if (!isChromiumReady()) throw new Error('browser unavailable: chromium is still downloading, try again shortly');
       const playwright = await import('playwright');
       await mkdir(this.profileDir, { recursive: true });
       this.context = await playwright.chromium.launchPersistentContext(this.profileDir, {

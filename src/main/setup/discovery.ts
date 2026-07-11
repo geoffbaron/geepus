@@ -21,7 +21,9 @@ async function discoverLmStudio(): Promise<DiscoveredRuntime> {
       id: 'lmstudio',
       available: true,
       binaryFound: true,
-      models: (data.data ?? []).map((m) => ({ name: m.id, sizeGb: 0 })),
+      // LM Studio's /v1/models doesn't expose a capability signal like Ollama's /api/show does
+      // — fail open rather than block adoption on a model we can't classify.
+      models: (data.data ?? []).map((m) => ({ name: m.id, sizeGb: 0, chatCapable: true })),
     };
   } catch {
     return { id: 'lmstudio', available: false, binaryFound: false, models: [] };

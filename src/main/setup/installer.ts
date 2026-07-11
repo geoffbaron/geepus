@@ -26,7 +26,7 @@ export function determineSetupPath(profile: MachineProfile, discovery: Discovery
 
   const ollama = discovery.runtimes.find((r) => r.id === 'ollama');
   if (ollama?.available) {
-    const hasSuitableModel = ollama.models.some((m) => modelLikelyFits(m.sizeGb, profile.ramGb));
+    const hasSuitableModel = ollama.models.some((m) => m.chatCapable && modelLikelyFits(m.sizeGb, profile.ramGb));
     if (hasSuitableModel) {
       return { path: 'A', reason: 'Ollama is already running with a model that fits this machine' };
     }

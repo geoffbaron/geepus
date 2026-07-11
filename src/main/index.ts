@@ -4,6 +4,7 @@ import { pathToFileURL } from 'node:url';
 import { is } from './util/env';
 import { registerIpcHandlers } from './ipc';
 import { bootstrapBundledModel } from './models/bootstrap';
+import { bootstrapChromium } from './browser/bootstrap';
 import { startSchedulerAndTriggers, stopSchedulerAndTriggers } from './schedule/instance';
 
 process.on('uncaughtException', (err) => {
@@ -89,6 +90,11 @@ app.whenReady().then(() => {
   });
 
   void startSchedulerAndTriggers();
+
+  // Runs in the background — the first browser tool call just waits on isChromiumReady()
+  // resolving. Full-variant builds find the baked copy instantly; lite builds download it
+  // once into a per-app cache (see src/main/browser/bootstrap.ts).
+  void bootstrapChromium((message) => console.log('[Geepus] chromium bootstrap:', message));
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

@@ -13,5 +13,8 @@ mac:
   # No signing identity configured yet — dev builds are unsigned.
   # Fill in identity + notarize once Geoff's Developer ID is available (PLAN.md §12, M7).
   identity: null
+# Distinct from electron-builder.full.yml's artifactName — both configs share the same
+# productName and output dir, and would silently overwrite each other's DMG otherwise.
+artifactName: '${productName}-${version}.${ext}'
 dmg:
   title: Geepus ${version}

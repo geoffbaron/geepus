@@ -12,6 +12,8 @@ export interface MachineProfile {
 export interface DiscoveredModel {
   name: string;
   sizeGb: number;
+  /** False for embedding-only models (e.g. nomic-embed-text) — never offered as the chat driver. */
+  chatCapable: boolean;
 }
 
 export type RuntimeId = 'ollama' | 'lmstudio';

@@ -14,7 +14,7 @@
     "test": "vitest run",
     "verify:catalog": "node scripts/verify-catalog.mts",
     "dist:lite": "npm run build && electron-builder --mac --config electron-builder.yml",
-    "dist:full": "GEEPUS_BUNDLE=full npm run build && GEEPUS_BUNDLE=full electron-builder --mac --config electron-builder.yml"
+    "dist:full": "node scripts/bake-full-bundle.mts && npm run build && electron-builder --mac --config electron-builder.full.yml"
   },
   "dependencies": {
     "imapflow": "^1.4.7",

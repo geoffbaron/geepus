@@ -34,7 +34,9 @@ export function Onboarding({ onComplete }: { onComplete: () => void }) {
   }, []);
 
   const ollamaRuntime = discovery?.runtimes.find((r) => r.id === 'ollama');
-  const suitableModel = ollamaRuntime?.models.find((m) => m.sizeGb > 0 && profile && m.sizeGb <= profile.ramGb * 0.6);
+  const suitableModel = ollamaRuntime?.models.find(
+    (m) => m.chatCapable && m.sizeGb > 0 && profile && m.sizeGb <= profile.ramGb * 0.6,
+  );
 
   async function speakWelcome(summary: string) {
     if (!profile || !plan) return;

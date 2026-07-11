@@ -58,6 +58,31 @@ export async function listOllamaModels(baseUrl = DEFAULT_BASE_URL): Promise<stri
 export interface OllamaModelInfo {
   name: string;
   sizeGb: number;
+  chatCapable: boolean;
+}
+
+/**
+ * Ollama's own capability list for a model (e.g. ["completion","tools"] vs ["embedding"]) —
+ * the authoritative signal for "can this model actually chat", found live: setup's Path A
+ * "adopt an already-installed model" heuristic used to judge fit by size alone, which meant
+ * an installed embedding-only model (e.g. nomic-embed-text, ~0.3GB) could get recommended as
+ * the chat driver since it's small enough to "fit" any machine.
+ */
+export async function isOllamaModelChatCapable(name: string, baseUrl = DEFAULT_BASE_URL): Promise<boolean> {
+  try {
+    const res = await fetch(`${baseUrl}/api/show`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!res.ok) return true; // metadata hiccup — don't block adoption on it, size-fit still applies
+    const data = (await res.json()) as { capabilities?: string[] };
+    if (!Array.isArray(data.capabilities) || data.capabilities.length === 0) return true;
+    return data.capabilities.includes('completion');
+  } catch {
+    return true; // network hiccup — fail open
+  }
 }
 
 /** Like listOllamaModels but with byte sizes, so setup/discovery.ts can judge "does this fit RAM". */
@@ -65,10 +90,13 @@ export async function listOllamaModelsDetailed(baseUrl = DEFAULT_BASE_URL): Prom
   const res = await fetch(`${baseUrl}/api/tags`);
   if (!res.ok) throw new Error(`ollama /api/tags failed: ${res.status}`);
   const data = (await res.json()) as { models?: Array<{ name: string; size?: number }> };
-  return (data.models ?? []).map((m) => ({
-    name: m.name,
-    sizeGb: Math.round(((m.size ?? 0) / 1024 ** 3) * 10) / 10,
-  }));
+  return Promise.all(
+    (data.models ?? []).map(async (m) => ({
+      name: m.name,
+      sizeGb: Math.round(((m.size ?? 0) / 1024 ** 3) * 10) / 10,
+      chatCapable: await isOllamaModelChatCapable(m.name, baseUrl),
+    })),
+  );
 }
 
 /** Spawns `ollama serve` detached and polls until the HTTP API responds. */

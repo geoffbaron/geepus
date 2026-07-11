@@ -1,0 +1,28 @@
+appId: com.geoffbaron.geepus
+productName: Geepus
+directories:
+  output: release
+  buildResources: resources
+files:
+  - out/**/*
+  - package.json
+# Bakes the pinned starter model + Chromium into Contents/Resources/ (see
+# scripts/bake-full-bundle.mts) so bootstrap.ts's baked-path checks find them and skip
+# the first-run downloads entirely — a fully offline install.
+extraResources:
+  - from: resources/models
+    to: models
+  - from: resources/playwright-browsers
+    to: playwright-browsers
+mac:
+  target: dmg
+  category: public.app-category.productivity
+  hardenedRuntime: true
+  # No signing identity configured yet — dev builds are unsigned.
+  # Fill in identity + notarize once Geoff's Developer ID is available (PLAN.md §12, M7).
+  identity: null
+# Distinct from electron-builder.yml's artifactName — both configs share the same
+# productName and output dir, and would silently overwrite each other's DMG otherwise.
+artifactName: '${productName}-${version}-full.${ext}'
+dmg:
+  title: Geepus ${version} (Full)

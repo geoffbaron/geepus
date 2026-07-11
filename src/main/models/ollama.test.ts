@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { OllamaProvider, isOllamaServerUp, listOllamaModelsDetailed } from './ollama';
+import { OllamaProvider, isOllamaModelChatCapable, isOllamaServerUp, listOllamaModelsDetailed } from './ollama';
 import type { ChatChunk } from '@shared/model';
 
 function ndjsonResponse(lines: string[]): Response {
@@ -153,22 +153,62 @@ describe('isOllamaServerUp', () => {
   });
 });
 
+describe('isOllamaModelChatCapable', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  // Regression: found live — Path A's "adopt an already-installed model" setup step judged
+  // fit by size alone, so a tiny embedding-only model (nomic-embed-text, ~0.3GB) could get
+  // offered as the chat driver. Ollama's /api/show capabilities list is the real signal.
+  it('is false for a model whose capabilities list omits "completion" (embedding-only)', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(new Response(JSON.stringify({ capabilities: ['embedding'] }), { status: 200 })),
+    );
+    expect(await isOllamaModelChatCapable('nomic-embed-text:latest')).toBe(false);
+  });
+
+  it('is true for a model whose capabilities list includes "completion"', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(new Response(JSON.stringify({ capabilities: ['completion', 'tools'] }), { status: 200 })),
+    );
+    expect(await isOllamaModelChatCapable('llama3.2:3b')).toBe(true);
+  });
+
+  it('fails open (true) when /api/show errors or omits capabilities', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('nope', { status: 500 })));
+    expect(await isOllamaModelChatCapable('some-model')).toBe(true);
+  });
+
+  it('fails open (true) when the request throws', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('ECONNREFUSED')));
+    expect(await isOllamaModelChatCapable('some-model')).toBe(true);
+  });
+});
+
 describe('listOllamaModelsDetailed', () => {
   afterEach(() => vi.unstubAllGlobals());
 
-  it('converts byte sizes to rounded GB', async () => {
+  it('converts byte sizes to rounded GB and attaches chatCapable per model', async () => {
     vi.stubGlobal(
       'fetch',
-      vi.fn().mockResolvedValue(
-        new Response(
-          JSON.stringify({ models: [{ name: 'llama3.2:3b', size: 2_147_483_648 }, { name: 'no-size' }] }),
-          { status: 200 },
-        ),
-      ),
+      vi.fn().mockImplementation((url: string, init?: RequestInit) => {
+        if (url.endsWith('/api/tags')) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({ models: [{ name: 'llama3.2:3b', size: 2_147_483_648 }, { name: 'nomic-embed-text:latest' }] }),
+              { status: 200 },
+            ),
+          );
+        }
+        const body = JSON.parse(String(init?.body)) as { name: string };
+        const capabilities = body.name === 'nomic-embed-text:latest' ? ['embedding'] : ['completion'];
+        return Promise.resolve(new Response(JSON.stringify({ capabilities }), { status: 200 }));
+      }),
     );
     expect(await listOllamaModelsDetailed()).toEqual([
-      { name: 'llama3.2:3b', sizeGb: 2 },
-      { name: 'no-size', sizeGb: 0 },
+      { name: 'llama3.2:3b', sizeGb: 2, chatCapable: true },
+      { name: 'nomic-embed-text:latest', sizeGb: 0, chatCapable: false },
     ]);
   });
 });
