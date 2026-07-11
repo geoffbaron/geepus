@@ -70,6 +70,12 @@ const geepus: IpcApi = {
       return () => ipcRenderer.removeListener('runtime.approvalRequested', listener);
     },
   },
+  memory: {
+    listEntries: () => ipcRenderer.invoke('memory.listEntries'),
+    remember: (text) => ipcRenderer.invoke('memory.remember', text),
+    forget: (namespace, id) => ipcRenderer.invoke('memory.forget', namespace, id),
+    consolidate: () => ipcRenderer.invoke('memory.consolidate'),
+  },
 };
 
 contextBridge.exposeInMainWorld('geepus', geepus);

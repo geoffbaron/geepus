@@ -108,6 +108,35 @@ describe('OllamaProvider.chat', () => {
     const chunks = await collect(provider.chat({ messages: [{ role: 'user', content: 'hi' }] }));
     expect(chunks).toEqual([{ type: 'error', message: 'ollama chat failed: 500' }]);
   });
+
+  // Regression: a live test caught this — the fetch to /api/chat had no timeout at all
+  // (every other network call in this codebase does), so a hung/never-responding request
+  // blocked the entire agent run forever with no way to recover. It must degrade to a
+  // normal 'error' chunk instead.
+  it('regression: yields an error chunk instead of throwing when the request itself fails/aborts', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new DOMException('The operation was aborted.', 'AbortError')));
+    const provider = new OllamaProvider({ model: 'llama3.2:3b' });
+    const chunks = await collect(provider.chat({ messages: [{ role: 'user', content: 'hi' }] }));
+    expect(chunks).toHaveLength(1);
+    expect(chunks[0]?.type).toBe('error');
+  });
+
+  // Regression: same failure mode, but the abort/error happens mid-stream (headers already
+  // received) rather than before the fetch resolves — this exercises the second failure path,
+  // inside the NDJSON read loop rather than the initial fetch call.
+  it('regression: yields an error chunk instead of throwing when the stream itself errors mid-read', async () => {
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(`${JSON.stringify({ message: { content: 'partial' }, done: false })}\n`));
+        controller.error(new Error('stream reset'));
+      },
+    });
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(body, { status: 200 })));
+    const provider = new OllamaProvider({ model: 'llama3.2:3b' });
+    const chunks = await collect(provider.chat({ messages: [{ role: 'user', content: 'hi' }] }));
+    expect(chunks.some((c) => c.type === 'error')).toBe(true);
+    expect(chunks.at(-1)?.type).toBe('error');
+  });
 });
 
 describe('isOllamaServerUp', () => {

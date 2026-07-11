@@ -262,3 +262,45 @@ body {
   border: none;
   cursor: pointer;
 }
+
+/* Memory browser */
+
+.memory-browser {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  min-height: 0;
+}
+
+.memory-entries {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.memory-entry {
+  padding: 0.6rem;
+  border-radius: 8px;
+  background: color-mix(in srgb, currentColor 5%, transparent);
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+}
+
+.memory-entry p {
+  flex: 1;
+  margin: 0;
+  font-size: 0.85rem;
+  white-space: pre-wrap;
+}
+
+.memory-entry button {
+  padding: 0.3rem 0.6rem;
+  border-radius: 6px;
+  border: none;
+  cursor: pointer;
+  flex-shrink: 0;
+}

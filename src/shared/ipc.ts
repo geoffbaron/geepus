@@ -10,6 +10,7 @@ import type { ChatChunk, ChatRequest, OllamaPullProgress, ProviderStatus } from 
 import type { Settings } from './settings';
 import type { DiscoveryReport, InstallOllamaResult, MachineProfile, Recommendation, SetupPlan } from './setup';
 import type { AgentEvent, PendingApproval, RunRequest } from './agent';
+import type { ConsolidationReport, MemoryEntry } from './memory';
 
 export interface DownloadProgress {
   downloadedBytes: number;
@@ -49,6 +50,12 @@ export interface IpcApi {
     listPendingApprovals: () => Promise<PendingApproval[]>;
     resolveApproval: (id: string, approved: boolean) => Promise<boolean>;
     onApprovalRequested: (onApproval: (approval: PendingApproval) => void) => () => void;
+  };
+  memory: {
+    listEntries: () => Promise<MemoryEntry[]>;
+    remember: (text: string) => Promise<void>;
+    forget: (namespace: string, id: string) => Promise<boolean>;
+    consolidate: () => Promise<ConsolidationReport[]>;
   };
 }
 

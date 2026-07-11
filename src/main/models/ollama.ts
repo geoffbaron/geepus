@@ -2,6 +2,8 @@ import type { ChatChunk, ChatRequest, OllamaPullProgress, ProviderId, ToolCall }
 import type { ModelProvider } from './provider';
 
 const DEFAULT_BASE_URL = 'http://127.0.0.1:11434';
+/** Generous for slow local inference, but bounded — see the comment at the fetch call site. */
+const CHAT_TIMEOUT_MS = 120_000;
 
 export interface OllamaConfig {
   baseUrl?: string;
@@ -153,16 +155,27 @@ export class OllamaProvider implements ModelProvider {
 
   async *chat(request: ChatRequest): AsyncGenerator<ChatChunk> {
     const baseUrl = this.config.baseUrl ?? DEFAULT_BASE_URL;
-    const res = await fetch(`${baseUrl}/api/chat`, {
-      method: 'POST',
-      body: JSON.stringify({
-        model: this.config.model,
-        messages: toOllamaMessages(request),
-        tools: toOllamaTools(request),
-        stream: true,
-        options: { temperature: request.temperature, num_predict: request.maxTokens },
-      }),
-    });
+    let res: Response;
+    try {
+      res = await fetch(`${baseUrl}/api/chat`, {
+        method: 'POST',
+        body: JSON.stringify({
+          model: this.config.model,
+          messages: toOllamaMessages(request),
+          tools: toOllamaTools(request),
+          stream: true,
+          options: { temperature: request.temperature, num_predict: request.maxTokens },
+        }),
+        // Every other network call in this codebase has a timeout; this one didn't, and a
+        // live test caught the consequence — a hung/never-closing stream from Ollama blocks
+        // the whole agent run forever with no way to recover (no CPU usage anywhere to even
+        // show something's wrong). 2 minutes is generous for slow local inference but bounded.
+        signal: AbortSignal.timeout(CHAT_TIMEOUT_MS),
+      });
+    } catch (err) {
+      yield { type: 'error', message: `ollama chat request failed: ${(err as Error).message}` };
+      return;
+    }
 
     if (!res.ok || !res.body) {
       yield { type: 'error', message: `ollama chat failed: ${res.status}` };
@@ -174,30 +187,38 @@ export class OllamaProvider implements ModelProvider {
     // has to be tracked across the whole stream, not read off the last chunk.
     let toolCallIndex = 0;
     let sawToolCall = false;
-    for await (const parsed of readNdjson<{
-      message?: OllamaResponseMessage;
-      done?: boolean;
-      done_reason?: string;
-    }>(res.body)) {
-      if (parsed.message?.content) {
-        yield { type: 'text', delta: parsed.message.content };
+    try {
+      for await (const parsed of readNdjson<{
+        message?: OllamaResponseMessage;
+        done?: boolean;
+        done_reason?: string;
+      }>(res.body)) {
+        if (parsed.message?.content) {
+          yield { type: 'text', delta: parsed.message.content };
+        }
+        for (const call of parsed.message?.tool_calls ?? []) {
+          sawToolCall = true;
+          const toolCall: ToolCall = {
+            id: call.id ?? `call_${toolCallIndex++}`,
+            name: call.function.name,
+            arguments: JSON.stringify(call.function.arguments),
+          };
+          yield { type: 'tool_call', toolCall };
+        }
+        if (parsed.done) {
+          yield {
+            type: 'done',
+            finishReason: sawToolCall ? 'tool_calls' : parsed.done_reason === 'length' ? 'length' : 'stop',
+          };
+          return;
+        }
       }
-      for (const call of parsed.message?.tool_calls ?? []) {
-        sawToolCall = true;
-        const toolCall: ToolCall = {
-          id: call.id ?? `call_${toolCallIndex++}`,
-          name: call.function.name,
-          arguments: JSON.stringify(call.function.arguments),
-        };
-        yield { type: 'tool_call', toolCall };
-      }
-      if (parsed.done) {
-        yield {
-          type: 'done',
-          finishReason: sawToolCall ? 'tool_calls' : parsed.done_reason === 'length' ? 'length' : 'stop',
-        };
-        return;
-      }
+    } catch (err) {
+      // Covers the abort firing mid-stream (CHAT_TIMEOUT_MS) as well as any other stream
+      // fault — without this, an aborted read rejects inside the generator and the
+      // exception propagates uncaught into the caller's `for await`, crashing the whole run
+      // instead of surfacing as a normal 'error' chunk the loop already knows how to handle.
+      yield { type: 'error', message: `ollama chat stream failed: ${(err as Error).message}` };
     }
   }
 }

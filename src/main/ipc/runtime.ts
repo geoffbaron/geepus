@@ -9,6 +9,7 @@ import { getBundledModelPath } from '../models/bootstrap';
 import { loadSecrets, loadSettings } from '../settings/store';
 import { AuditLog } from '../policy/audit';
 import { listPendingApprovals, onApprovalRequested, resolveApproval } from '../policy/approvals';
+import { getMemoryService } from '../memory/instance';
 
 export function registerRuntimeIpc(): void {
   // Approvals are cross-cutting (a scheduled run could raise one with no chat window
@@ -32,6 +33,7 @@ export function registerRuntimeIpc(): void {
       const provider = resolveActiveProvider({ settings, secrets, bundledModelPath: getBundledModelPath() });
       const auditLog = new AuditLog(join(userDataDir, 'audit.log'));
       await auditLog.init();
+      const memory = getMemoryService(settings.ollama.baseUrl);
 
       for await (const agentEvent of runObjective({
         objective: request.objective,
@@ -39,6 +41,7 @@ export function registerRuntimeIpc(): void {
         provider,
         budgets: request.budgets,
         auditLog,
+        memory,
       })) {
         event.sender.send(channel, agentEvent);
       }

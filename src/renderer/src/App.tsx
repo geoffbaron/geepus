@@ -3,9 +3,10 @@ import { Onboarding } from './onboarding/Onboarding';
 import { Chat } from './chat/Chat';
 import { AgentRunner } from './agent/AgentRunner';
 import { ApprovalsInbox } from './agent/ApprovalsInbox';
+import { MemoryBrowser } from './memory/MemoryBrowser';
 import { PermissionsPanel } from './settings/PermissionsPanel';
 
-type View = 'chat' | 'agent' | 'approvals' | 'permissions';
+type View = 'chat' | 'agent' | 'approvals' | 'memory' | 'permissions';
 
 export function App() {
   const [onboardingComplete, setOnboardingComplete] = useState<boolean | null>(null);
@@ -22,6 +23,7 @@ export function App() {
     { id: 'chat', label: 'Chat' },
     { id: 'agent', label: 'Agent' },
     { id: 'approvals', label: 'Approvals' },
+    { id: 'memory', label: 'Memory' },
     { id: 'permissions', label: 'Permissions' },
   ];
 
@@ -37,6 +39,7 @@ export function App() {
       {view === 'chat' && <Chat />}
       {view === 'agent' && <AgentRunner />}
       {view === 'approvals' && <ApprovalsInbox />}
+      {view === 'memory' && <MemoryBrowser />}
       {view === 'permissions' && <PermissionsPanel />}
     </main>
   );

@@ -2,6 +2,7 @@ import type { ChatMessage, ChatRequest, ToolCall } from '@shared/model';
 import type { AgentEvent, RunBudgets, TaskClass, ToolResult } from '@shared/agent';
 import type { ModelProvider } from '../models/provider';
 import type { AuditLog } from '../policy/audit';
+import type { MemoryService } from '../memory/service';
 import { getToolDefinitions, executeTool } from '../tools/registry';
 import { classifyObjective } from './classify';
 import { checkCompletion } from './complete';
@@ -18,9 +19,18 @@ export interface RunObjectiveOptions {
   provider: ModelProvider;
   budgets?: Partial<RunBudgets>;
   auditLog?: AuditLog;
+  /** Optional — when provided, relevant learned strategies/skills are injected into the
+   * system prompt, and a successful run's outcome is recorded back into memory (M4). */
+  memory?: MemoryService;
 }
 
-function systemPromptFor(taskClass: TaskClass, tools: ReturnType<typeof getToolDefinitions>): string {
+async function systemPromptFor(
+  taskClass: TaskClass,
+  tools: ReturnType<typeof getToolDefinitions>,
+  objective: string,
+  workspaceRoot: string,
+  memory: MemoryService | undefined,
+): Promise<string> {
   const toolList = tools.map((t) => `- ${t.name}: ${t.description}`).join('\n');
   const lines = [
     'You are Geepus, a local-only digital assistant.',
@@ -30,6 +40,18 @@ function systemPromptFor(taskClass: TaskClass, tools: ReturnType<typeof getToolD
     lines.push('Answer as soon as you have the information — do not write files or run commands unless the user actually asked for that.');
   }
   lines.push('Available tools:', toolList, 'Call a tool when you need to. When you have a final answer, respond with plain text and no tool calls.');
+
+  if (memory) {
+    // Two distinct sources: general remembered notes (recall) and learned strategies/skills
+    // from past runs (getPromptContext) — both matter to the planner, neither subsumes the other.
+    const [recallContext, strategyContext] = await Promise.all([
+      memory.recallPrompt(objective, workspaceRoot).catch(() => ''),
+      memory.getPromptContext(objective).catch(() => ''),
+    ]);
+    if (recallContext) lines.push(recallContext);
+    if (strategyContext) lines.push(strategyContext);
+  }
+
   return lines.join('\n\n');
 }
 
@@ -56,7 +78,10 @@ export async function* runObjective(options: RunObjectiveOptions): AsyncGenerato
 
   const tools = getToolDefinitions();
   const messages: ChatMessage[] = [
-    { role: 'system', content: systemPromptFor(taskClass, tools) },
+    {
+      role: 'system',
+      content: await systemPromptFor(taskClass, tools, options.objective, options.workspaceRoot, options.memory),
+    },
     { role: 'user', content: options.objective },
   ];
 
@@ -73,7 +98,10 @@ export async function* runObjective(options: RunObjectiveOptions): AsyncGenerato
     iteration += 1;
     yield { type: 'iteration_start', iteration };
 
-    const request: ChatRequest = { messages, tools };
+    // Bounds worst-case generation length per turn (defense in depth alongside the provider-
+    // level stream timeout) — a small/weak model left uncapped can generate a very long,
+    // repetitive response before ever emitting a stop token.
+    const request: ChatRequest = { messages, tools, maxTokens: 2048 };
     let assistantText = '';
     const pendingCalls: ToolCall[] = [];
     let sawError: string | null = null;
@@ -129,6 +157,19 @@ export async function* runObjective(options: RunObjectiveOptions): AsyncGenerato
     const completion = checkCompletion(taskClass, toolResults, assistantText.trim().length > 0 && pendingCalls.length === 0);
     if (completion.done) {
       const reflection = await tryReflect(options.provider, messages);
+      if (options.memory) {
+        await options.memory
+          .recordRunOutcome({
+            objective: options.objective,
+            workspaceRoot: options.workspaceRoot,
+            success: true,
+            reflection,
+            toolSequence: toolResults.map((r) => r.tool),
+          })
+          .catch(() => {
+            // Memory recording is best-effort — a failure here must never fail the run itself.
+          });
+      }
       yield { type: 'done', success: true, reason: completion.reason, reflection };
       return;
     }
@@ -150,6 +191,7 @@ async function tryReflect(provider: ModelProvider, messages: ChatMessage[]): Pro
             'In one short sentence, note anything worth remembering about how you solved this for next time (or say "nothing notable").',
         },
       ],
+      maxTokens: 200,
     };
     let text = '';
     for await (const chunk of provider.chat(reflectionRequest)) {

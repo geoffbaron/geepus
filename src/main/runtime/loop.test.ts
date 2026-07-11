@@ -1,11 +1,12 @@
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { runObjective } from './loop';
 import type { AgentEvent } from '@shared/agent';
 import type { ChatChunk, ChatRequest, ProviderId } from '@shared/model';
 import type { ModelProvider } from '../models/provider';
+import { MemoryService } from '../memory/service';
 
 /** A scripted provider: each call to chat() consumes the next script entry, so tests can
  * drive the loop through exact multi-turn scenarios without a real (or mocked-fetch) LLM. */
@@ -147,5 +148,78 @@ describe('runObjective', () => {
     const events = await collect(runObjective({ objective: 'hi', workspaceRoot, provider }));
     const done = events.find((e) => e.type === 'done') as { reflection?: string };
     expect(done.reflection).toBe('Nothing notable.');
+  });
+
+  describe('memory integration (M4)', () => {
+    let memoryDir: string;
+    let memory: MemoryService;
+
+    beforeEach(async () => {
+      memoryDir = await mkdtemp(join(tmpdir(), 'geepus-loop-memory-test-'));
+      memory = new MemoryService({ dataDir: memoryDir });
+      vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('use local hash embeddings in tests')));
+    });
+
+    afterEach(async () => {
+      await rm(memoryDir, { recursive: true, force: true });
+      vi.unstubAllGlobals();
+    });
+
+    it('injects relevant memory context into the system prompt when a memory service is provided', async () => {
+      await memory.remember('always double check the spelling of place names', undefined);
+
+      let sawContextInPrompt = false;
+      const provider = new ScriptedProvider([
+        (req) => {
+          const systemMessage = req.messages.find((m) => m.role === 'system');
+          sawContextInPrompt = Boolean(systemMessage && systemMessage.content.includes('spelling of place names'));
+          return [{ type: 'text', delta: 'ok' }, { type: 'done', finishReason: 'stop' }];
+        },
+        () => [{ type: 'text', delta: 'Nothing notable.' }, { type: 'done', finishReason: 'stop' }],
+      ]);
+
+      await collect(runObjective({ objective: 'double check the spelling of place names in this doc', workspaceRoot, provider, memory }));
+      expect(sawContextInPrompt).toBe(true);
+    });
+
+    it('records the run outcome to memory on successful completion, before done resolves', async () => {
+      // Only two provider calls happen here, not three: the 'build' completion gate is
+      // satisfied as soon as write_file succeeds in iteration 1 (checked at the end of every
+      // iteration), so the loop goes straight from that tool call to the reflection call —
+      // there's no separate "final answer" turn in between.
+      const provider = new ScriptedProvider([
+        () => [
+          { type: 'tool_call', toolCall: { id: 'c1', name: 'write_file', arguments: JSON.stringify({ path: 'out.txt', content: 'hi' }) } },
+          { type: 'done', finishReason: 'tool_calls' },
+        ],
+        () => [
+          { type: 'text', delta: 'when you build a summary generator, always write the summary file first' },
+          { type: 'done', finishReason: 'stop' },
+        ],
+      ]);
+
+      await collect(runObjective({ objective: 'build a summary generator', workspaceRoot, provider, memory }));
+
+      // recordRunOutcome already resolved by the time the generator finished (awaited, not fire-and-forget).
+      const context = await memory.getPromptContext('build a summary generator');
+      expect(context).toContain('summary file');
+    });
+
+    it('does not fail the run if memory recording throws', async () => {
+      const brokenMemory = {
+        getPromptContext: vi.fn().mockResolvedValue(''),
+        recallPrompt: vi.fn().mockResolvedValue(''),
+        recordRunOutcome: vi.fn().mockRejectedValue(new Error('disk full')),
+      } as unknown as MemoryService;
+
+      const provider = new ScriptedProvider([
+        () => [{ type: 'text', delta: 'hello!' }, { type: 'done', finishReason: 'stop' }],
+        () => [{ type: 'text', delta: 'Nothing notable.' }, { type: 'done', finishReason: 'stop' }],
+      ]);
+
+      const events = await collect(runObjective({ objective: 'hi', workspaceRoot, provider, memory: brokenMemory }));
+      const done = events.find((e) => e.type === 'done') as { success: boolean };
+      expect(done.success).toBe(true);
+    });
   });
 });
