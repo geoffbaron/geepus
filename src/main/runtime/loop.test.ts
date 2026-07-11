@@ -2,6 +2,20 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+const { proposeBrowserControllerIfApplicable, mockGoto } = vi.hoisted(() => ({
+  proposeBrowserControllerIfApplicable: vi.fn().mockResolvedValue(null),
+  mockGoto: vi.fn().mockResolvedValue('URL: https://example.com'),
+}));
+vi.mock('../browser/controllerProposal', () => ({ proposeBrowserControllerIfApplicable }));
+
+// Never launch a real Chromium instance from this unit test file — these tests only care
+// about the wiring from loop.ts into proposeBrowserControllerIfApplicable, not actual
+// browser behavior (that's covered live in browser/session live-testing).
+vi.mock('../browser/instance', () => ({
+  getBrowserSession: () => ({ goto: mockGoto }),
+}));
+
 import { runObjective } from './loop';
 import type { AgentEvent } from '@shared/agent';
 import type { ChatChunk, ChatRequest, ProviderId } from '@shared/model';
@@ -218,6 +232,47 @@ describe('runObjective', () => {
       ]);
 
       const events = await collect(runObjective({ objective: 'hi', workspaceRoot, provider, memory: brokenMemory }));
+      const done = events.find((e) => e.type === 'done') as { success: boolean };
+      expect(done.success).toBe(true);
+    });
+  });
+
+  describe('browser controller proposal wiring (M6)', () => {
+    beforeEach(() => proposeBrowserControllerIfApplicable.mockClear());
+
+    it('proposes a controller spec after a successful browse-classified run', async () => {
+      const provider = new ScriptedProvider([
+        () => [
+          { type: 'tool_call', toolCall: { id: 'c1', name: 'browser_goto', arguments: JSON.stringify({ url: 'https://example.com' }) } },
+          { type: 'done', finishReason: 'tool_calls' },
+        ],
+      ]);
+      // "buy" classifies as 'browse' per classify.ts's BROWSE_PATTERNS.
+      await collect(runObjective({ objective: 'buy this item on example.com', workspaceRoot, provider }));
+      expect(proposeBrowserControllerIfApplicable).toHaveBeenCalledOnce();
+      const [args] = proposeBrowserControllerIfApplicable.mock.calls[0]!;
+      expect(args.calls).toHaveLength(1);
+      expect(args.calls[0].call.name).toBe('browser_goto');
+    });
+
+    it('does not propose a controller spec for a non-browse task class', async () => {
+      const provider = new ScriptedProvider([
+        () => [{ type: 'text', delta: 'hello!' }, { type: 'done', finishReason: 'stop' }],
+        () => [{ type: 'text', delta: 'Nothing notable.' }, { type: 'done', finishReason: 'stop' }],
+      ]);
+      await collect(runObjective({ objective: 'hi', workspaceRoot, provider }));
+      expect(proposeBrowserControllerIfApplicable).not.toHaveBeenCalled();
+    });
+
+    it('does not fail the run if proposing a controller spec throws', async () => {
+      proposeBrowserControllerIfApplicable.mockRejectedValueOnce(new Error('disk full'));
+      const provider = new ScriptedProvider([
+        () => [
+          { type: 'tool_call', toolCall: { id: 'c1', name: 'browser_goto', arguments: JSON.stringify({ url: 'https://example.com' }) } },
+          { type: 'done', finishReason: 'tool_calls' },
+        ],
+      ]);
+      const events = await collect(runObjective({ objective: 'buy this item on example.com', workspaceRoot, provider }));
       const done = events.find((e) => e.type === 'done') as { success: boolean };
       expect(done.success).toBe(true);
     });

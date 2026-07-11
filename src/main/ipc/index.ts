@@ -7,11 +7,11 @@ import { registerMemoryIpc } from './memory';
 import { registerScheduleIpc } from './schedule';
 import { registerMailIpc } from './mail';
 import { registerBriefIpc } from './brief';
+import { registerBrowserIpc } from './browser';
 
 /**
- * Mounts every namespaced IPC module. Add one line here per new namespace
- * (browser, ...) as milestones land —
- * never grow a single flat handler file again (see PLAN.md §10, ipc-handlers.js).
+ * Mounts every namespaced IPC module — never grow a single flat handler file again
+ * (see PLAN.md §10, ipc-handlers.js).
  */
 export function registerIpcHandlers(): void {
   registerAppIpc();
@@ -23,4 +23,5 @@ export function registerIpcHandlers(): void {
   registerScheduleIpc();
   registerMailIpc();
   registerBriefIpc();
+  registerBrowserIpc();
 }

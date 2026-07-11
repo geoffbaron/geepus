@@ -1,5 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import { classifyFsPath, classifyHttpGet, classifyRunCommand, isHardDenied, isHttpAllowlisted, isShellAllowlisted } from './rules';
+import {
+  classifyBrowserInteraction,
+  classifyFsPath,
+  classifyHttpGet,
+  classifyRunCommand,
+  isCheckoutShaped,
+  isHardDenied,
+  isHttpAllowlisted,
+  isShellAllowlisted,
+} from './rules';
 
 describe('hard deny', () => {
   it.each([
@@ -85,5 +94,33 @@ describe('fs path scoping', () => {
   it('a sibling directory that merely shares a path prefix is NOT treated as inside', () => {
     // /Users/test/workspace-evil starts with the string "/Users/test/workspace" but is a different directory.
     expect(classifyFsPath('/Users/test/workspace-evil/file.txt', workspaceRoot, 'write')).toBe('sensitive');
+  });
+});
+
+describe('checkout-shaped browser interactions', () => {
+  it.each([
+    { text: 'Place Order' },
+    { text: 'Submit Order' },
+    { text: 'Complete Purchase' },
+    { text: 'Confirm Order' },
+    { text: 'Pay Now' },
+    { text: 'Buy Now' },
+    { label: 'Checkout' },
+    { text: 'Confirm Booking' },
+  ])('flags as checkout-shaped (sensitive): %o', (target) => {
+    expect(isCheckoutShaped(target)).toBe(true);
+    expect(classifyBrowserInteraction(target)).toBe('sensitive');
+  });
+
+  it.each([{ text: 'Add to Cart' }, { text: 'View Product' }, { role: 'button', text: 'Next' }, { label: 'Email address' }])(
+    'does not flag an earlier, reversible step: %o',
+    (target) => {
+      expect(isCheckoutShaped(target)).toBe(false);
+      expect(classifyBrowserInteraction(target)).toBe('write');
+    },
+  );
+
+  it('checks both text and label fields', () => {
+    expect(isCheckoutShaped({ role: 'button', label: 'place order' })).toBe(true);
   });
 });

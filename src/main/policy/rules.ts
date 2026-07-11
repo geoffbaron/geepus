@@ -1,4 +1,5 @@
 import type { RiskTier } from '@shared/agent';
+import type { BrowserTarget } from '@shared/browser';
 
 /**
  * Patterns that are never allowed, no matter who asks — these bypass the Approvals
@@ -79,4 +80,30 @@ export function classifyFsPath(resolvedPath: string, workspaceRoot: string, mode
   const insideWorkspace = resolvedPath === workspaceRoot || resolvedPath.startsWith(`${workspaceRoot}/`);
   if (insideWorkspace) return mode === 'read' ? 'read' : 'write';
   return 'sensitive';
+}
+
+/** "Purchase-shaped browser actions ... always ask" (PLAN.md §9) — the FINAL commit-to-
+ * purchase/booking step, not earlier steps like "add to cart" which are freely reversible. */
+const CHECKOUT_SHAPED_PATTERNS: RegExp[] = [
+  /\bplace order\b/i,
+  /\bsubmit order\b/i,
+  /\bcomplete (purchase|order|checkout)\b/i,
+  /\bconfirm (purchase|order|booking|reservation)\b/i,
+  /\bpay now\b/i,
+  /\bbuy now\b/i,
+  /\bcheckout\b/i,
+  /\bcomplete booking\b/i,
+];
+
+export function isCheckoutShaped(target: BrowserTarget): boolean {
+  const text = `${target.text ?? ''} ${target.label ?? ''}`;
+  return CHECKOUT_SHAPED_PATTERNS.some((p) => p.test(text));
+}
+
+/** Navigation/observation (goto/find/read/scroll/wait_for) is 'read' tier — non-destructive
+ * by nature. Interactions (click/type/select) are 'write' unless the target looks
+ * checkout-shaped, in which case they're 'sensitive' — this is the actual gate M6's accept
+ * criterion refers to ("pauses for approval at checkout-shaped actions"). */
+export function classifyBrowserInteraction(target: BrowserTarget): RiskTier {
+  return isCheckoutShaped(target) ? 'sensitive' : 'write';
 }

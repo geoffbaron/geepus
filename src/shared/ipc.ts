@@ -14,6 +14,7 @@ import type { ConsolidationReport, MemoryEntry } from './memory';
 import type { FileWatchTrigger, FileWatchTriggerInput, ScheduledTask, ScheduledTaskInput } from './schedule';
 import type { ImapConnectionTestResult, InboxRunResult, MailAccountInput } from './mail';
 import type { DailyBrief } from './brief';
+import type { ProposedControllerSpec } from './browser';
 
 export interface DownloadProgress {
   downloadedBytes: number;
@@ -78,6 +79,10 @@ export interface IpcApi {
   };
   brief: {
     generate: () => Promise<DailyBrief>;
+  };
+  browser: {
+    listProposedControllers: (workspaceRoot?: string) => Promise<ProposedControllerSpec[]>;
+    promoteController: (specId: string, workspaceRoot?: string) => Promise<string>;
   };
 }
 

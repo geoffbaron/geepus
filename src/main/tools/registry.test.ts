@@ -7,9 +7,25 @@ import { listPendingApprovals, resolveApproval } from '../policy/approvals';
 import { AuditLog } from '../policy/audit';
 
 describe('getToolDefinitions', () => {
-  it('exposes all seven M3 tools', () => {
+  it('exposes all fifteen tools (M3 core + M6 browser)', () => {
     const names = getToolDefinitions().map((t) => t.name).sort();
-    expect(names).toEqual(['http_get', 'list_files', 'read_file', 'recall', 'remember', 'run_command', 'write_file']);
+    expect(names).toEqual([
+      'browser_click',
+      'browser_find',
+      'browser_goto',
+      'browser_read',
+      'browser_scroll',
+      'browser_select',
+      'browser_type',
+      'browser_wait_for',
+      'http_get',
+      'list_files',
+      'read_file',
+      'recall',
+      'remember',
+      'run_command',
+      'write_file',
+    ]);
   });
 });
 

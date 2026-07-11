@@ -4,6 +4,7 @@ import type { ModelProvider } from '../models/provider';
 import type { AuditLog } from '../policy/audit';
 import type { MemoryService } from '../memory/service';
 import { getToolDefinitions, executeTool } from '../tools/registry';
+import { proposeBrowserControllerIfApplicable } from '../browser/controllerProposal';
 import { classifyObjective } from './classify';
 import { checkCompletion } from './complete';
 
@@ -86,6 +87,7 @@ export async function* runObjective(options: RunObjectiveOptions): AsyncGenerato
   ];
 
   const toolResults: ToolResult[] = [];
+  const toolCallLog: Array<{ call: ToolCall; result: ToolResult }> = [];
   let toolCallCount = 0;
   const startTime = Date.now();
   let iteration = 0;
@@ -145,6 +147,7 @@ export async function* runObjective(options: RunObjectiveOptions): AsyncGenerato
           auditLog: options.auditLog,
         });
         toolResults.push(result);
+        toolCallLog.push({ call, result });
         yield { type: 'tool_result', toolCall: call, result };
         messages.push({ role: 'tool', content: JSON.stringify(result), toolCallId: call.id });
       }
@@ -169,6 +172,17 @@ export async function* runObjective(options: RunObjectiveOptions): AsyncGenerato
           .catch(() => {
             // Memory recording is best-effort — a failure here must never fail the run itself.
           });
+      }
+      if (taskClass === 'browse') {
+        // Successful site flows become replayable playbooks (PLAN.md §7 item 5) — proposed
+        // only, never auto-promoted to active (that needs a verified successful replay).
+        await proposeBrowserControllerIfApplicable({
+          objective: options.objective,
+          workspaceRoot: options.workspaceRoot,
+          calls: toolCallLog,
+        }).catch(() => {
+          // Best-effort, same as memory recording above.
+        });
       }
       yield { type: 'done', success: true, reason: completion.reason, reflection };
       return;

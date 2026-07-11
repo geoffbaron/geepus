@@ -4,6 +4,7 @@ import { listFilesTool, readFileTool, writeFileTool } from './fs';
 import { runCommandTool } from './shell';
 import { httpGetTool } from './web';
 import { recallTool, rememberTool } from './memory';
+import { BROWSER_TOOLS } from './browser';
 import type { ToolContext, ToolHandler } from './types';
 import { requestApproval } from '../policy/approvals';
 import type { AuditLog } from '../policy/audit';
@@ -16,6 +17,7 @@ const TOOLS: ToolHandler[] = [
   httpGetTool,
   rememberTool,
   recallTool,
+  ...BROWSER_TOOLS,
 ];
 
 const TOOL_MAP = new Map(TOOLS.map((t) => [t.definition.name, t]));

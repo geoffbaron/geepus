@@ -95,6 +95,10 @@ const geepus: IpcApi = {
   brief: {
     generate: () => ipcRenderer.invoke('brief.generate'),
   },
+  browser: {
+    listProposedControllers: (workspaceRoot) => ipcRenderer.invoke('browser.listProposedControllers', workspaceRoot),
+    promoteController: (specId, workspaceRoot) => ipcRenderer.invoke('browser.promoteController', specId, workspaceRoot),
+  },
 };
 
 contextBridge.exposeInMainWorld('geepus', geepus);
