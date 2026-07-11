@@ -1,0 +1,56 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#282d5e"/>
+      <stop offset="0.55" stop-color="#191d3e"/>
+      <stop offset="1" stop-color="#10132b"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.46" r="0.72">
+      <stop offset="0" stop-color="#6f6df5" stop-opacity="0.55"/>
+      <stop offset="0.35" stop-color="#6f6df5" stop-opacity="0.26"/>
+      <stop offset="0.55" stop-color="#6f6df5" stop-opacity="0.13"/>
+      <stop offset="0.75" stop-color="#6f6df5" stop-opacity="0.05"/>
+      <stop offset="0.9" stop-color="#6f6df5" stop-opacity="0.015"/>
+      <stop offset="1" stop-color="#6f6df5" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="orb" cx="0.34" cy="0.28" r="0.95">
+      <stop offset="0" stop-color="#cdb4ff"/>
+      <stop offset="0.35" stop-color="#9b7bf7"/>
+      <stop offset="0.75" stop-color="#5f63ee"/>
+      <stop offset="1" stop-color="#3f4bd8"/>
+    </radialGradient>
+    <radialGradient id="spec" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.85"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
+    <clipPath id="squircle">
+      <rect x="100" y="100" width="824" height="824" rx="186"/>
+    </clipPath>
+  </defs>
+
+  <g clip-path="url(#squircle)">
+    <rect x="100" y="100" width="824" height="824" fill="url(#bg)"/>
+
+    <!-- faint stars -->
+    <circle cx="248" cy="252" r="7" fill="#aeb6ff" opacity="0.5"/>
+    <circle cx="792" cy="216" r="5" fill="#aeb6ff" opacity="0.38"/>
+    <circle cx="848" cy="580" r="6" fill="#aeb6ff" opacity="0.32"/>
+    <circle cx="196" cy="640" r="4" fill="#aeb6ff" opacity="0.3"/>
+    <circle cx="716" cy="812" r="5" fill="#aeb6ff" opacity="0.26"/>
+    <circle cx="320" cy="800" r="4" fill="#aeb6ff" opacity="0.22"/>
+
+    <!-- one soft glow behind the orb -->
+    <circle cx="512" cy="482" r="420" fill="url(#glow)"/>
+
+    <!-- the orb -->
+    <circle cx="512" cy="482" r="238" fill="url(#orb)"/>
+
+    <!-- specular highlight -->
+    <ellipse cx="420" cy="372" rx="155" ry="125" fill="url(#spec)" opacity="0.5"/>
+
+    <!-- friendly face: two capsule eyes + a gentle smile -->
+    <rect x="424" y="398" width="50" height="98" rx="25" fill="#ffffff" opacity="0.96"/>
+    <rect x="550" y="398" width="50" height="98" rx="25" fill="#ffffff" opacity="0.96"/>
+    <path d="M 442 564 Q 512 622 582 564" fill="none" stroke="#ffffff" stroke-opacity="0.94" stroke-width="30" stroke-linecap="round"/>
+  </g>
+</svg>

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ChatMessage } from '@shared/model';
 import { activityLabel } from '../lib/friendly';
+import { Orb } from '../components/Orb';
 
 /**
  * The one conversation. Every message runs through the full agent runtime, so Geepus can
@@ -125,7 +126,7 @@ export function Chat() {
       <div className="messages" ref={scrollRef}>
         {turns.length === 0 && (
           <div className="welcome">
-            <div className="welcome-orb" aria-hidden />
+            <Orb />
             <h1>Hi, I'm Geepus.</h1>
             <p>Your personal assistant — everything stays private, right here on this Mac.</p>
             <div className="suggestions">

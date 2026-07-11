@@ -347,10 +347,7 @@ details.advanced > *:not(summary) {
 }
 
 .welcome-orb {
-  width: 56px;
-  height: 56px;
   border-radius: 50%;
-  background: radial-gradient(circle at 30% 30%, #9b6df5, var(--accent) 70%);
   box-shadow: 0 4px 24px color-mix(in srgb, var(--accent) 45%, transparent);
   animation: breathe 3.5s ease-in-out infinite;
 }

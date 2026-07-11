@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import type { OllamaPullProgress } from '@shared/model';
 import type { DiscoveryReport, MachineProfile, Recommendation, SetupPlan } from '@shared/setup';
 import { askOnce } from '../lib/askOnce';
+import { Orb } from '../components/Orb';
 
 /**
  * First-run setup, written for someone's dad: no "Ollama", no "LLM", no "runtime" in the
@@ -155,7 +156,7 @@ export function Onboarding({ onComplete }: { onComplete: () => void }) {
   if (stage === 'probing') {
     return (
       <div className="onboarding centered">
-        <div className="welcome-orb" aria-hidden />
+        <Orb size={72} />
         <h1>Hi, I'm Geepus.</h1>
         <p className="muted">
           <span className="spinner" /> Taking a quick look at your computer…
@@ -167,7 +168,7 @@ export function Onboarding({ onComplete }: { onComplete: () => void }) {
   if (stage === 'busy') {
     return (
       <div className="onboarding centered">
-        <div className="welcome-orb" aria-hidden />
+        <Orb size={72} />
         <p>{busyLabel}</p>
         {busyPct !== null && (
           <div className="progress">
@@ -205,7 +206,7 @@ export function Onboarding({ onComplete }: { onComplete: () => void }) {
   // stage === 'path'
   return (
     <div className="onboarding">
-      <div className="welcome-orb" aria-hidden />
+      <Orb size={72} />
       <h1>Hi, I'm Geepus.</h1>
       <p>
         I'm a personal assistant that lives entirely on this Mac — private by design. Let's get you set up; it only
