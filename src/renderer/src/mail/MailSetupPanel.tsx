@@ -1,11 +1,101 @@
 import { useEffect, useState } from 'react';
+import type { WebmailProviderId } from '@shared/webmail';
 
 /**
- * Email connect, dad-proof: type your address, Geepus figures out the rest and walks you
- * through getting an "app password" (with a button that opens the exact right page).
- * Server host/port only exist under "Advanced", and only demand attention when the
- * address isn't from a provider we recognize.
+ * Email connect, dad-proof: click "Connect Gmail", a real browser window opens, sign in
+ * exactly like you always do (password, 2FA, everything) — Geepus never sees the
+ * password. This is the default path (PLAN2.md N2); the old IMAP/app-password flow still
+ * works but lives behind "Use a mail password instead" for people who prefer it.
  */
+
+export function MailSetupPanel() {
+  const [connected, setConnected] = useState(false);
+  const [connectedProvider, setConnectedProvider] = useState<WebmailProviderId | null>(null);
+  const [connecting, setConnecting] = useState(false);
+  const [status, setStatus] = useState<string | null>(null);
+  const [imapConfigured, setImapConfigured] = useState(false);
+
+  async function refresh() {
+    const [webmailStatus, imapDone] = await Promise.all([window.geepus.webmail.getStatus(), window.geepus.mail.isConfigured()]);
+    setConnected(webmailStatus.connected);
+    setConnectedProvider(webmailStatus.provider);
+    setImapConfigured(imapDone);
+  }
+
+  useEffect(() => {
+    void refresh();
+  }, []);
+
+  async function connectGmail() {
+    setConnecting(true);
+    setStatus('Opening a sign-in window — sign in there like you normally would, then come back here.');
+    try {
+      await window.geepus.webmail.connect('gmail');
+    } catch {
+      setStatus("Couldn't open the sign-in window. Try again in a moment.");
+      setConnecting(false);
+    }
+  }
+
+  async function checkConnection() {
+    setStatus('Checking…');
+    const result = await window.geepus.webmail.checkStatus('gmail');
+    if (result.connected) {
+      setConnected(true);
+      setConnectedProvider(result.provider);
+      setConnecting(false);
+      setStatus(null);
+    } else {
+      setStatus("Doesn't look signed in yet — finish signing in in that window, then try again.");
+    }
+  }
+
+  async function disconnect() {
+    await window.geepus.webmail.disconnect();
+    setConnected(false);
+    setConnectedProvider(null);
+  }
+
+  if (connected) {
+    return (
+      <div className="card">
+        <p>
+          ✅ <strong>Email is connected{connectedProvider ? ` (${connectedProvider === 'gmail' ? 'Gmail' : connectedProvider})` : ''}.</strong>{' '}
+          Geepus reads new mail to build your daily summary — it can never send, move, or delete anything.
+        </p>
+        <button onClick={() => void disconnect()}>Disconnect</button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="card">
+      <h3>Connect your email</h3>
+      <p className="muted">
+        Sign in once, in a real browser window — the same way you always sign into email. Geepus never sees or
+        stores your password. It can only <em>read</em> mail to build your daily summary; sending, moving, or
+        deleting isn't possible, by design.
+      </p>
+
+      <button className="primary" onClick={() => void connectGmail()} disabled={connecting}>
+        Connect Gmail
+      </button>
+      <p className="muted">More providers coming soon.</p>
+
+      {connecting && (
+        <div className="helper">
+          {status && <p>{status}</p>}
+          <button onClick={() => void checkConnection()}>I'm signed in — check now</button>
+        </div>
+      )}
+
+      <details className="advanced">
+        <summary>Use a mail password instead</summary>
+        <ImapAdvancedForm configured={imapConfigured} onConfigured={() => setImapConfigured(true)} />
+      </details>
+    </div>
+  );
+}
 
 interface MailProvider {
   label: string;
@@ -15,7 +105,7 @@ interface MailProvider {
   passwordHint: string;
 }
 
-const PROVIDERS: Record<string, MailProvider> = {
+const IMAP_PROVIDERS: Record<string, MailProvider> = {
   gmail: {
     label: 'Gmail',
     host: 'imap.gmail.com',
@@ -46,17 +136,18 @@ const PROVIDERS: Record<string, MailProvider> = {
   },
 };
 
-function detectProvider(email: string): { id: string; provider: MailProvider } | null {
+function detectImapProvider(email: string): { id: string; provider: MailProvider } | null {
   const domain = email.split('@')[1]?.toLowerCase().trim();
   if (!domain) return null;
-  for (const [id, provider] of Object.entries(PROVIDERS)) {
+  for (const [id, provider] of Object.entries(IMAP_PROVIDERS)) {
     if (provider.domains.includes(domain)) return { id, provider };
   }
   return null;
 }
 
-export function MailSetupPanel() {
-  const [configured, setConfigured] = useState(false);
+/** The original app-password flow — kept working for anyone who prefers it, but no
+ * longer the default path (see MailSetupPanel above). */
+function ImapAdvancedForm({ configured, onConfigured }: { configured: boolean; onConfigured: () => void }) {
   const [email, setEmail] = useState('');
   const [pass, setPass] = useState('');
   const [host, setHost] = useState('');
@@ -64,11 +155,7 @@ export function MailSetupPanel() {
   const [hostTouched, setHostTouched] = useState(false);
   const [status, setStatus] = useState<{ kind: 'busy' | 'ok' | 'problem'; text: string } | null>(null);
 
-  useEffect(() => {
-    void window.geepus.mail.isConfigured().then(setConfigured);
-  }, []);
-
-  const detected = detectProvider(email);
+  const detected = detectImapProvider(email);
   const hasAddress = email.includes('@') && email.split('@')[1]!.includes('.');
   const effectiveHost = hostTouched ? host : (detected?.provider.host ?? host);
   const unknownProvider = hasAddress && !detected;
@@ -85,40 +172,20 @@ export function MailSetupPanel() {
       return;
     }
     await window.geepus.mail.saveAccount(config);
-    setConfigured(true);
     setPass('');
     setStatus(null);
+    onConfigured();
   }
 
   if (configured) {
-    return (
-      <div className="card">
-        <p>
-          ✅ <strong>Email is connected.</strong> Geepus reads new mail to build your daily summary — it can never
-          send, move, or delete anything.
-        </p>
-        <button onClick={() => setConfigured(false)}>Use a different account</button>
-      </div>
-    );
+    return <p className="muted">✓ A mail-password account is also configured (used only if no email is connected above).</p>;
   }
 
   return (
-    <div className="card">
-      <h3>Connect your email</h3>
-      <p className="muted">
-        Geepus reads your unread mail to include it in your daily summary. It can only <em>read</em> — sending,
-        moving, or deleting isn't possible, by design.
-      </p>
-
+    <>
       <label className="field">
         <span>Your email address</span>
-        <input
-          type="email"
-          value={email}
-          onChange={(e) => setEmail(e.target.value)}
-          placeholder="you@example.com"
-          autoComplete="email"
-        />
+        <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" autoComplete="email" />
       </label>
 
       {detected && (
@@ -158,7 +225,7 @@ export function MailSetupPanel() {
 
       {hasAddress && (
         <details className="advanced">
-          <summary>Advanced</summary>
+          <summary>Server details</summary>
           <label className="field">
             <span>Mail server (IMAP host)</span>
             <input value={effectiveHost} onChange={(e) => { setHost(e.target.value); setHostTouched(true); }} />
@@ -174,6 +241,6 @@ export function MailSetupPanel() {
         {status?.kind === 'busy' ? 'Connecting…' : 'Connect'}
       </button>
       {status && status.kind !== 'busy' && <p className={status.kind === 'problem' ? 'problem' : 'muted'}>{status.text}</p>}
-    </div>
+    </>
   );
 }

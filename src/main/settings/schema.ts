@@ -2,6 +2,7 @@ import { z } from 'zod';
 import type { Settings as SharedSettings } from '@shared/settings';
 
 export const ProviderIdSchema = z.enum(['ollama', 'bundled', 'openrouter']);
+export const WebmailProviderIdSchema = z.enum(['gmail']);
 
 /**
  * Non-secret settings only — API keys live in secrets.bin via safeStorage
@@ -41,6 +42,13 @@ export const SettingsSchema = z.object({
       port: z.number().default(993),
       secure: z.boolean().default(true),
       user: z.string().default(''),
+    })
+    .default({}),
+  /** Which webmail account is connected via the Geepus Browser (PLAN2.md N2) — the
+   * default, zero-app-password path. `mail` above (IMAP) is the Advanced fallback. */
+  webmail: z
+    .object({
+      provider: WebmailProviderIdSchema.nullable().default(null),
     })
     .default({}),
   /** Used only for the Daily Brief's weather section — null skips it entirely. */

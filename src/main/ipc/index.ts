@@ -9,6 +9,7 @@ import { registerMailIpc } from './mail';
 import { registerBriefIpc } from './brief';
 import { registerBrowserIpc } from './browser';
 import { registerHandoffIpc } from './handoff';
+import { registerWebmailIpc } from './webmail';
 
 /**
  * Mounts every namespaced IPC module — never grow a single flat handler file again
@@ -26,4 +27,5 @@ export function registerIpcHandlers(): void {
   registerBriefIpc();
   registerBrowserIpc();
   registerHandoffIpc();
+  registerWebmailIpc();
 }

@@ -7,7 +7,7 @@ import { getChromiumBootstrapError, isChromiumReady } from './bootstrap';
 // graph until a browser action is actually used.
 type PlaywrightModule = typeof import('playwright');
 type BrowserContext = Awaited<ReturnType<PlaywrightModule['chromium']['launchPersistentContext']>>;
-type Page = ReturnType<BrowserContext['pages']>[number];
+export type Page = ReturnType<BrowserContext['pages']>[number];
 type Locator = ReturnType<Page['getByRole']>;
 
 /**
@@ -17,13 +17,22 @@ type Locator = ReturnType<Page['getByRole']>;
  * extension-bridge backend (driving the user's real Chrome) is a scoped-out fast-follow —
  * M6's accept criterion only requires bundled Chromium.
  */
+export interface BrowserSessionOptions {
+  /** false makes a real, visible OS window — used by the webmail connect flow so the user
+   * can see and complete their own sign-in. Agent-driven browsing tasks stay headless
+   * (true, the default) — nothing about them needs to be on screen. */
+  headless?: boolean;
+}
+
 export class BrowserSession {
   private context: BrowserContext | null = null;
   private page: Page | null = null;
   private readonly profileDir: string;
+  private readonly headless: boolean;
 
-  constructor(profileDir: string) {
+  constructor(profileDir: string, options: BrowserSessionOptions = {}) {
     this.profileDir = profileDir;
+    this.headless = options.headless ?? true;
   }
 
   private resolveLocator(page: Page, target: BrowserTarget): Locator {
@@ -66,8 +75,15 @@ export class BrowserSession {
       if (!isChromiumReady()) throw new Error('browser unavailable: chromium is still downloading, try again shortly');
       const playwright = await import('playwright');
       await mkdir(this.profileDir, { recursive: true });
+      // Explicit executablePath, always the full Chromium binary — Playwright's automatic
+      // revision lookup hardcodes headless:true to chromium_headless_shell and headless:false
+      // to plain chromium (confirmed live: they are NOT interchangeable at the launch-resolution
+      // level, even though the full binary natively supports headless launches). Passing the
+      // path explicitly bypasses that lookup so one installed/baked binary serves both the
+      // agent's headless browsing and the webmail connect flow's real, visible window.
       this.context = await playwright.chromium.launchPersistentContext(this.profileDir, {
-        headless: true,
+        headless: this.headless,
+        executablePath: playwright.chromium.executablePath(),
         acceptDownloads: true,
         args: ['--disable-blink-features=AutomationControlled'],
       });
@@ -133,6 +149,24 @@ export class BrowserSession {
 
   currentUrl(): string | null {
     return this.page && !this.page.isClosed() ? this.page.url() : null;
+  }
+
+  /** Brings a headful window in front of other windows — used after navigating so the
+   * user actually sees the sign-in page they need to complete (webmail connect flow). */
+  async focus(): Promise<void> {
+    const page = await this.ensurePage();
+    await page.bringToFront();
+  }
+
+  /**
+   * Escape hatch for callers that need real Playwright Page APIs beyond the generic
+   * BrowserTarget-based methods above — e.g. a provider-specific inbox reader that
+   * extracts structured data no semantic goto/find/click call can express. Keeps the
+   * Playwright Page type encapsulated in this module rather than leaking it everywhere.
+   */
+  async withPage<T>(fn: (page: Page) => Promise<T>): Promise<T> {
+    const page = await this.ensurePage();
+    return fn(page);
   }
 
   async close(): Promise<void> {

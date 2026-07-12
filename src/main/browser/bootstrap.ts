@@ -1,7 +1,7 @@
 import { app } from 'electron';
 import { spawn } from 'node:child_process';
 import { access } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 let chromiumReady = false;
 let chromiumError: string | null = null;
@@ -61,11 +61,23 @@ export async function bootstrapChromium(
 
 function runInstall(browsersPath: string, onProgress?: (message: string) => void): Promise<void> {
   return new Promise((resolve, reject) => {
-    const cliPath = require.resolve('playwright/cli.js');
-    // BrowserSession always launches headless — only-shell skips the ~170MB full Chromium
-    // binary we never use (confirmed live: launchPersistentContext({headless:true}) only
-    // needs chromium_headless_shell, not the regular chromium build).
-    const child = spawn(process.execPath, [cliPath, 'install', 'chromium', '--only-shell'], {
+    // NOT require.resolve('playwright/cli.js') — playwright's package.json `exports` map
+    // doesn't list ./cli.js, so that throws ERR_PACKAGE_PATH_NOT_EXPORTED at runtime
+    // (found live via the N2 Electron E2E; the lite variant's first-run browser download
+    // was silently broken by this — nothing in M7 exercised the download path because the
+    // full variant bakes the browser and dev machines had caches). Resolving the package
+    // main and deriving cli.js's path sidesteps the exports map, which doesn't apply to
+    // plain filesystem joins.
+    const cliPath = join(dirname(require.resolve('playwright')), 'cli.js');
+    // The full "chromium" binary, not chromium_headless_shell — PLAN2.md N2's webmail
+    // connect flow opens a real, visible sign-in window (headless:false), and
+    // headless_shell is a headless-ONLY stripped build that cannot open a window at all
+    // (confirmed live: launchPersistentContext({headless:false}) throws "Executable
+    // doesn't exist" against a headless_shell-only install). The full binary handles both
+    // headless (agent browsing) and headful (webmail) launches, so one install covers both
+    // — an M7-era optimization that only fetched headless_shell no longer applies now that
+    // headful mode is a real requirement. --no-shell skips the redundant shell-only binary.
+    const child = spawn(process.execPath, [cliPath, 'install', 'chromium', '--no-shell'], {
       env: { ...process.env, PLAYWRIGHT_BROWSERS_PATH: browsersPath, ELECTRON_RUN_AS_NODE: '1' },
     });
     child.stdout?.on('data', (chunk: Buffer) => onProgress?.(chunk.toString().trim()));

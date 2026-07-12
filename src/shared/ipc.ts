@@ -16,6 +16,7 @@ import type { ImapConnectionTestResult, InboxRunResult, MailAccountInput } from 
 import type { DailyBrief } from './brief';
 import type { ProposedControllerSpec } from './browser';
 import type { OpenCalendarFileResult, OpenMailDraftResult } from './handoff';
+import type { WebmailConnectionStatus, WebmailProviderId, WebmailProviderInfo } from './webmail';
 
 export interface DownloadProgress {
   downloadedBytes: number;
@@ -93,6 +94,18 @@ export interface IpcApi {
     openMailDraft: (draft: { to?: string; subject: string; body: string }) => Promise<OpenMailDraftResult>;
     /** Opens a Geepus-generated .ics file in the user's default calendar app. */
     openCalendarFile: (path: string) => Promise<OpenCalendarFileResult>;
+  };
+  webmail: {
+    listProviders: () => Promise<WebmailProviderInfo[]>;
+    /** Opens a real, visible sign-in window for the user to complete themselves. */
+    connect: (providerId: WebmailProviderId) => Promise<void>;
+    /** Navigates the Geepus Browser to the inbox and checks whether it's signed in yet. */
+    checkStatus: (providerId: WebmailProviderId) => Promise<WebmailConnectionStatus>;
+    /** Last-known connection state from settings — no browser round-trip. */
+    getStatus: () => Promise<WebmailConnectionStatus>;
+    /** Closes the session and deletes the browser profile entirely. */
+    disconnect: () => Promise<void>;
+    runInboxNow: () => Promise<InboxRunResult>;
   };
 }
 

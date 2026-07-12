@@ -16,14 +16,17 @@ const DEV_CACHE_PATH = join(import.meta.dirname, '..', '.dev-cache', BUNDLED_MOD
 // Electron's app name defaults to package.json's "name" ("geepus"), not productName.
 const USER_DATA_CACHE_PATH = join(homedir(), 'Library', 'Application Support', 'geepus', 'models', BUNDLED_MODEL.filename);
 
-// BrowserSession always launches headless — only chromium-headless-shell is ever loaded
-// (confirmed live: launchPersistentContext({headless:true}) never touches the ~170MB
-// regular Chromium build), so that's the only browser baked/installed here.
+// The full "chromium" binary, not chromium_headless_shell — PLAN2.md N2's webmail connect
+// flow opens a real, visible sign-in window (headless:false), and headless_shell is a
+// headless-ONLY stripped build that cannot open a window at all (confirmed live). The full
+// binary handles both headless (agent browsing) and headful (webmail) launches, so one
+// install covers both — supersedes M7's headless_shell-only optimization, made before
+// headful mode was a requirement.
 const RESOURCES_BROWSERS_DIR = join(import.meta.dirname, '..', 'resources', 'playwright-browsers');
 const browsersJsonPath = join(import.meta.dirname, '..', 'node_modules', 'playwright-core', 'browsers.json');
 const browsersJson = JSON.parse(await readFile(browsersJsonPath, 'utf-8')) as { browsers: Array<{ name: string; revision: string }> };
-const CHROMIUM_REVISION = browsersJson.browsers.find((b) => b.name === 'chromium-headless-shell')!.revision;
-const CHROMIUM_DIRNAME = `chromium_headless_shell-${CHROMIUM_REVISION}`;
+const CHROMIUM_REVISION = browsersJson.browsers.find((b) => b.name === 'chromium')!.revision;
+const CHROMIUM_DIRNAME = `chromium-${CHROMIUM_REVISION}`;
 const SYSTEM_CACHE_CHROMIUM_PATH = join(homedir(), 'Library', 'Caches', 'ms-playwright', CHROMIUM_DIRNAME);
 const USER_DATA_CHROMIUM_PATH = join(homedir(), 'Library', 'Application Support', 'geepus', 'playwright-browsers', CHROMIUM_DIRNAME);
 
@@ -110,7 +113,7 @@ async function bakeModel(): Promise<void> {
 function installChromium(browsersPath: string): Promise<void> {
   return new Promise((resolve, reject) => {
     const cliPath = join(import.meta.dirname, '..', 'node_modules', 'playwright', 'cli.js');
-    const child = spawn(process.execPath, [cliPath, 'install', 'chromium', '--only-shell'], {
+    const child = spawn(process.execPath, [cliPath, 'install', 'chromium', '--no-shell'], {
       env: { ...process.env, PLAYWRIGHT_BROWSERS_PATH: browsersPath },
       stdio: 'inherit',
     });

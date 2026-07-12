@@ -104,6 +104,14 @@ const geepus: IpcApi = {
     openMailDraft: (draft) => ipcRenderer.invoke('handoff.openMailDraft', draft),
     openCalendarFile: (path) => ipcRenderer.invoke('handoff.openCalendarFile', path),
   },
+  webmail: {
+    listProviders: () => ipcRenderer.invoke('webmail.listProviders'),
+    connect: (providerId) => ipcRenderer.invoke('webmail.connect', providerId),
+    checkStatus: (providerId) => ipcRenderer.invoke('webmail.checkStatus', providerId),
+    getStatus: () => ipcRenderer.invoke('webmail.getStatus'),
+    disconnect: () => ipcRenderer.invoke('webmail.disconnect'),
+    runInboxNow: () => ipcRenderer.invoke('webmail.runInboxNow'),
+  },
 };
 
 contextBridge.exposeInMainWorld('geepus', geepus);
