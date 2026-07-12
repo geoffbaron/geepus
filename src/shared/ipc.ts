@@ -15,6 +15,7 @@ import type { FileWatchTrigger, FileWatchTriggerInput, ScheduledTask, ScheduledT
 import type { ImapConnectionTestResult, InboxRunResult, MailAccountInput } from './mail';
 import type { DailyBrief } from './brief';
 import type { ProposedControllerSpec } from './browser';
+import type { OpenCalendarFileResult, OpenMailDraftResult } from './handoff';
 
 export interface DownloadProgress {
   downloadedBytes: number;
@@ -86,6 +87,12 @@ export interface IpcApi {
   browser: {
     listProposedControllers: (workspaceRoot?: string) => Promise<ProposedControllerSpec[]>;
     promoteController: (specId: string, workspaceRoot?: string) => Promise<string>;
+  };
+  handoff: {
+    /** Opens the user's default mail client with a draft prefilled. Never sends anything. */
+    openMailDraft: (draft: { to?: string; subject: string; body: string }) => Promise<OpenMailDraftResult>;
+    /** Opens a Geepus-generated .ics file in the user's default calendar app. */
+    openCalendarFile: (path: string) => Promise<OpenCalendarFileResult>;
   };
 }
 

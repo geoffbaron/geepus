@@ -54,6 +54,13 @@ const OPERATE_PATTERNS = [
   /\bbackup\b/,
   /\borganize\b/,
   /\blaunch (the|this)\b/,
+  // Handoff primitives (PLAN2.md N1) — draft/schedule land here so draft_email/
+  // propose_event get favored over chat's plain-text response.
+  /\bdraft (an?|the)?\s*(email|reply|response|message)\b/,
+  /\bwrite (an?|the)?\s*email\b/,
+  /\b(add|put) .*(to|on) (my |the )?calendar\b/,
+  /\bpropose (an?|the) (event|meeting|time)\b/,
+  /\bset up (an?|the) (appointment|meeting|event)\b/,
 ];
 
 const RESEARCH_PATTERNS = [

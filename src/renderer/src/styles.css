@@ -423,6 +423,38 @@ details.advanced > *:not(summary) {
   margin-bottom: 0.5rem;
 }
 
+/* Review cards (drafted emails / proposed events) — a bit more contrast than the
+ * surrounding bubble so the thing awaiting your decision stands out. */
+.review-card {
+  margin-top: 0.5rem;
+  background: var(--surface-strong);
+  border: 1px solid var(--border);
+  min-width: min(360px, 100%);
+}
+
+.review-card-field {
+  display: flex;
+  gap: 0.5rem;
+  font-size: 0.9rem;
+}
+
+.review-card-label {
+  flex-shrink: 0;
+  width: 4.5rem;
+  opacity: 0.55;
+  font-weight: 600;
+}
+
+.review-card-body {
+  margin: 0;
+  padding: 0.6rem 0.7rem;
+  border-radius: 8px;
+  background: color-mix(in srgb, currentColor 4%, transparent);
+  font-size: 0.9rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .steps {
   margin-top: 0.5rem;
 }

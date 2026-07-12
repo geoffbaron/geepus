@@ -61,6 +61,22 @@ describe('classifyObjective', () => {
     );
   });
 
+  // PLAN2.md N1 — handoff primitives route through 'operate' so draft_email/propose_event
+  // get favored over a plain chat response.
+  describe('operate (handoff primitives)', () => {
+    it.each([
+      'draft an email to my landlord about the leak',
+      'write an email to Sarah about the project',
+      'draft a reply to that message',
+      'schedule my dentist appointment for next Tuesday at 2pm',
+      'add this to my calendar',
+      'set up a meeting with the team tomorrow',
+      'propose a time for the interview',
+    ])('"%s" -> operate', (objective) => {
+      expect(classifyObjective(objective)).toBe('operate');
+    });
+  });
+
   describe('research', () => {
     it.each([
       'research the best budget laptops under $500',

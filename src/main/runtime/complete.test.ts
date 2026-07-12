@@ -56,6 +56,20 @@ describe('checkCompletion', () => {
     it('build does not complete on a FAILED write_file', () => {
       expect(checkCompletion('build', [toolResult({ tool: 'write_file', ok: false })], true).done).toBe(false);
     });
+
+    // PLAN2.md N1 — drafting/proposing counts as the artifact for a "draft an email" /
+    // "schedule an appointment" objective (both classify as 'operate').
+    it('operate completes once draft_email succeeds', () => {
+      expect(checkCompletion('operate', [toolResult({ tool: 'draft_email' })], false).done).toBe(true);
+    });
+
+    it('operate completes once propose_event succeeds', () => {
+      expect(checkCompletion('operate', [toolResult({ tool: 'propose_event' })], false).done).toBe(true);
+    });
+
+    it('operate does not complete on a FAILED draft_email', () => {
+      expect(checkCompletion('operate', [toolResult({ tool: 'draft_email', ok: false })], true).done).toBe(false);
+    });
   });
 
   describe('research / browse behave like lookup', () => {

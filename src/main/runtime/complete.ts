@@ -9,7 +9,7 @@ export interface CompletionCheck {
  * artifacts/verification" (PLAN.md §4). 'operate' groups with 'build' here since both are
  * "did the action actually happen" checks, unlike a lookup/research answer. */
 const ARTIFACT_REQUIRED_CLASSES = new Set<TaskClass>(['build', 'operate']);
-const ARTIFACT_TOOLS = new Set(['write_file', 'run_command']);
+const ARTIFACT_TOOLS = new Set(['write_file', 'run_command', 'draft_email', 'propose_event']);
 
 /**
  * Task-class-aware completion gate — the fix for AGENT_LOOP_INVESTIGATION.md bugs #2 and #3.

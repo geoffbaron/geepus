@@ -100,6 +100,10 @@ const geepus: IpcApi = {
     listProposedControllers: (workspaceRoot) => ipcRenderer.invoke('browser.listProposedControllers', workspaceRoot),
     promoteController: (specId, workspaceRoot) => ipcRenderer.invoke('browser.promoteController', specId, workspaceRoot),
   },
+  handoff: {
+    openMailDraft: (draft) => ipcRenderer.invoke('handoff.openMailDraft', draft),
+    openCalendarFile: (path) => ipcRenderer.invoke('handoff.openCalendarFile', path),
+  },
 };
 
 contextBridge.exposeInMainWorld('geepus', geepus);

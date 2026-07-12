@@ -8,6 +8,7 @@ import { registerScheduleIpc } from './schedule';
 import { registerMailIpc } from './mail';
 import { registerBriefIpc } from './brief';
 import { registerBrowserIpc } from './browser';
+import { registerHandoffIpc } from './handoff';
 
 /**
  * Mounts every namespaced IPC module — never grow a single flat handler file again
@@ -24,4 +25,5 @@ export function registerIpcHandlers(): void {
   registerMailIpc();
   registerBriefIpc();
   registerBrowserIpc();
+  registerHandoffIpc();
 }

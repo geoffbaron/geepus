@@ -1,7 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ChatMessage } from '@shared/model';
+import type { HandoffCard } from '@shared/handoff';
 import { activityLabel } from '../lib/friendly';
 import { Orb } from '../components/Orb';
+import { ReviewCard } from '../components/ReviewCard';
+
+const HANDOFF_TOOL_NAMES = new Set(['draft_email', 'propose_event']);
 
 /**
  * The one conversation. Every message runs through the full agent runtime, so Geepus can
@@ -16,6 +20,8 @@ interface Turn {
   /** Technical steps behind this reply — for the optional disclosure. */
   steps?: string[];
   failed?: boolean;
+  /** A drafted email or proposed event awaiting the user's review (PLAN2.md N1). */
+  card?: HandoffCard;
 }
 
 const SUGGESTIONS = [
@@ -77,12 +83,22 @@ export function Chat() {
           setActivity(activityLabel(event.toolCall.name));
           patchReply((r) => ({ ...r, steps: [...(r.steps ?? []), `→ ${event.toolCall.name}(${event.toolCall.arguments})`] }));
           break;
-        case 'tool_result':
+        case 'tool_result': {
+          let card: HandoffCard | undefined;
+          if (event.result.ok && HANDOFF_TOOL_NAMES.has(event.toolCall.name) && event.result.output) {
+            try {
+              card = JSON.parse(event.result.output) as HandoffCard;
+            } catch {
+              // Malformed output shouldn't crash the chat — the steps disclosure still shows the raw summary.
+            }
+          }
           patchReply((r) => ({
             ...r,
             steps: [...(r.steps ?? []), `${event.result.ok ? '✓' : '✗'} ${event.result.summary}`],
+            card: card ?? r.card,
           }));
           break;
+        }
         case 'approval_needed':
           setActivity('Waiting for your OK');
           break;
@@ -143,6 +159,7 @@ export function Chat() {
           <div key={i} className={`bubble-row ${t.role}`}>
             <div className={`bubble ${t.role} ${t.failed ? 'failed' : ''}`}>
               <p>{t.content || (running && i === turns.length - 1 ? '' : '')}</p>
+              {t.card && <ReviewCard card={t.card} />}
               {t.role === 'assistant' && (t.steps?.length ?? 0) > 0 && (
                 <details className="steps">
                   <summary>See how I did this</summary>

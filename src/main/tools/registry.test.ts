@@ -7,7 +7,7 @@ import { listPendingApprovals, resolveApproval } from '../policy/approvals';
 import { AuditLog } from '../policy/audit';
 
 describe('getToolDefinitions', () => {
-  it('exposes all fifteen tools (M3 core + M6 browser)', () => {
+  it('exposes all seventeen tools (M3 core + M6 browser + N1 handoff)', () => {
     const names = getToolDefinitions().map((t) => t.name).sort();
     expect(names).toEqual([
       'browser_click',
@@ -18,8 +18,10 @@ describe('getToolDefinitions', () => {
       'browser_select',
       'browser_type',
       'browser_wait_for',
+      'draft_email',
       'http_get',
       'list_files',
+      'propose_event',
       'read_file',
       'recall',
       'remember',

@@ -22,6 +22,10 @@ export function activityLabel(tool: string): string {
       return 'Checking my notes';
     case 'remember':
       return 'Making a note';
+    case 'draft_email':
+      return 'Drafting an email';
+    case 'propose_event':
+      return 'Setting up a calendar event';
     default:
       return 'Working on it';
   }
@@ -45,6 +49,10 @@ export function approvalLabel(tool: string): string {
       return 'check its notes';
     case 'remember':
       return 'make a note';
+    case 'draft_email':
+      return 'draft an email';
+    case 'propose_event':
+      return 'set up a calendar event';
     default:
       return `use "${tool}"`;
   }
@@ -68,6 +76,16 @@ export function scheduleLabel(schedule: string): string {
     return `Every day at ${displayHour}:${String(minute).padStart(2, '0')} ${ampm}`;
   }
   return schedule;
+}
+
+/** "Tue, Jul 14 · 2:00 – 3:00 PM"-style phrasing for an event's start/end. */
+export function eventTimeLabel(startsAtIso: string, endsAtIso: string): string {
+  const start = new Date(startsAtIso);
+  const end = new Date(endsAtIso);
+  const dateLabel = start.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
+  const startTime = start.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+  const endTime = end.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+  return `${dateLabel} · ${startTime} – ${endTime}`;
 }
 
 /** "Tomorrow at 8:00 AM"-style phrasing for a timestamp. */
