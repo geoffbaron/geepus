@@ -11,9 +11,8 @@ Grab the latest DMG and drag Geepus into Applications. There are two variants:
 - **Geepus-\<version\>-full.dmg** — bigger download, works fully offline from first
   launch. Best if you don't already use Ollama or don't want to wait on any downloads.
 - **Geepus-\<version\>.dmg** (lite) — smaller download; on first launch it fetches a
-  small starter model (~1GB) and, the first time you ask it to do something in a
-  browser, a headless Chromium (~200MB). Both downloads are checksum-verified and only
-  happen once.
+  small starter model (~1GB) and a private browser (~170MB) in the background. Both
+  downloads are verified and only happen once.
 
 Since these builds aren't yet signed with an Apple Developer ID (see [Known
 limitations](#known-limitations)), macOS will refuse to open the app and say
