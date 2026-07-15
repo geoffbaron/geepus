@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer } from 'electron';
 import type { IpcApi } from '@shared/ipc';
 import type { ChatChunk, OllamaPullProgress } from '@shared/model';
 import type { AgentEvent, PendingApproval } from '@shared/agent';
+import type { UpdateStatus } from '@shared/update';
 
 const geepus: IpcApi = {
   app: {
@@ -111,6 +112,16 @@ const geepus: IpcApi = {
     getStatus: () => ipcRenderer.invoke('webmail.getStatus'),
     disconnect: () => ipcRenderer.invoke('webmail.disconnect'),
     runInboxNow: () => ipcRenderer.invoke('webmail.runInboxNow'),
+  },
+  updates: {
+    getStatus: () => ipcRenderer.invoke('updates.getStatus'),
+    check: () => ipcRenderer.invoke('updates.check'),
+    installNow: () => ipcRenderer.invoke('updates.installNow'),
+    onStatus: (onStatus) => {
+      const listener = (_event: Electron.IpcRendererEvent, status: UpdateStatus): void => onStatus(status);
+      ipcRenderer.on('updates.status', listener);
+      return () => ipcRenderer.removeListener('updates.status', listener);
+    },
   },
 };
 

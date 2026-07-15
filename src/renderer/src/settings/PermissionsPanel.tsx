@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import type { ProviderId, ProviderStatus } from '@shared/model';
+import type { UpdateStatus } from '@shared/update';
 import { MailSetupPanel } from '../mail/MailSetupPanel';
 import { MemoryBrowser } from '../memory/MemoryBrowser';
 
@@ -15,11 +16,28 @@ const BRAIN_LABELS: Record<ProviderId, { label: string; blurb: string }> = {
   openrouter: { label: 'Cloud brain (developer testing only)', blurb: 'Sends questions to the internet — not private. For development.' },
 };
 
+function updateStatusLabel(status: UpdateStatus): string {
+  switch (status.state) {
+    case 'checking':
+      return 'Checking for updates…';
+    case 'downloading':
+      return `Downloading an update… ${status.percent}%`;
+    case 'ready':
+      return `Version ${status.version} is ready — restart Geepus to finish.`;
+    case 'error':
+      return "Couldn't check right now (that's usually just no connection).";
+    default:
+      return "You're on the latest version.";
+  }
+}
+
 export function PermissionsPanel() {
   const [notificationStatus, setNotificationStatus] = useState<'idle' | 'sent'>('idle');
   const [providers, setProviders] = useState<ProviderStatus[]>([]);
   const [activeProvider, setActiveProvider] = useState<ProviderId>('bundled');
   const [developerEnabled, setDeveloperEnabled] = useState(false);
+  const [version, setVersion] = useState('');
+  const [updateStatus, setUpdateStatus] = useState<UpdateStatus>({ state: 'idle' });
 
   useEffect(() => {
     void window.geepus.models.listProviders().then(setProviders);
@@ -27,6 +45,9 @@ export function PermissionsPanel() {
       setActiveProvider(s.activeProvider);
       setDeveloperEnabled(s.developer.enabled);
     });
+    void window.geepus.app.getVersion().then(setVersion);
+    void window.geepus.updates.getStatus().then(setUpdateStatus);
+    return window.geepus.updates.onStatus(setUpdateStatus);
   }, []);
 
   async function requestNotifications() {
@@ -61,6 +82,24 @@ export function PermissionsPanel() {
       <div className="card">
         <h3>Things Geepus remembers</h3>
         <MemoryBrowser />
+      </div>
+
+      <div className="card">
+        <h3>About &amp; updates</h3>
+        <p className="muted">
+          Geepus {version && `v${version}`} — updates install themselves in the background and only ever download
+          what changed, so you never re-download the whole app.
+        </p>
+        <p className="muted">{updateStatusLabel(updateStatus)}</p>
+        {updateStatus.state === 'ready' ? (
+          <button className="primary" onClick={() => void window.geepus.updates.installNow()}>
+            Restart to update
+          </button>
+        ) : (
+          <button onClick={() => void window.geepus.updates.check()} disabled={updateStatus.state === 'checking' || updateStatus.state === 'downloading'}>
+            Check for updates
+          </button>
+        )}
       </div>
 
       <div className="card">

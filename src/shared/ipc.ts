@@ -17,6 +17,7 @@ import type { DailyBrief } from './brief';
 import type { ProposedControllerSpec } from './browser';
 import type { OpenCalendarFileResult, OpenMailDraftResult } from './handoff';
 import type { WebmailConnectionStatus, WebmailProviderId, WebmailProviderInfo } from './webmail';
+import type { UpdateStatus } from './update';
 
 export interface DownloadProgress {
   downloadedBytes: number;
@@ -106,6 +107,14 @@ export interface IpcApi {
     /** Closes the session and deletes the browser profile entirely. */
     disconnect: () => Promise<void>;
     runInboxNow: () => Promise<InboxRunResult>;
+  };
+  updates: {
+    getStatus: () => Promise<UpdateStatus>;
+    /** Manual "check now" — for a Settings button. Auto-check already runs on launch. */
+    check: () => Promise<void>;
+    /** Quit and apply the already-downloaded update. Only meaningful after 'ready'. */
+    installNow: () => Promise<void>;
+    onStatus: (onStatus: (status: UpdateStatus) => void) => () => void;
   };
 }
 

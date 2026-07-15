@@ -29,8 +29,17 @@ module.exports = {
       { from: 'resources/playwright-browsers', to: 'playwright-browsers' },
     ],
   }),
+  // Auto-update feed (electron-updater). Building with this present emits latest-mac.yml +
+  // .blockmap alongside the artifacts, which is what enables differential ("only the changed
+  // bytes") downloads. GitHub Releases must be PUBLIC for a shipped app to read them — a
+  // distributed binary can't carry a private-repo token.
+  publish: { provider: 'github', owner: 'geoffbaron', repo: 'geepus' },
   mac: {
-    target: 'dmg',
+    // zip is REQUIRED for macOS auto-update — Squirrel.Mac applies the zip, not the dmg; the
+    // dmg is only the first-run installer. The lite variant is the canonical update channel
+    // (small bundle, heavy assets live in userData and survive updates untouched); the full
+    // variant is a one-time offline installer, so it ships dmg only.
+    target: variant === 'full' ? ['dmg'] : ['dmg', 'zip'],
     category: 'public.app-category.productivity',
     hardenedRuntime: true,
     ...(sign

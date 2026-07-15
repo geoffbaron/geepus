@@ -6,6 +6,7 @@ import { registerIpcHandlers } from './ipc';
 import { bootstrapBundledModel } from './models/bootstrap';
 import { bootstrapChromium } from './browser/bootstrap';
 import { startSchedulerAndTriggers, stopSchedulerAndTriggers } from './schedule/instance';
+import { initUpdater } from './updater';
 
 process.on('uncaughtException', (err) => {
   console.error('[Geepus] Uncaught exception:', err);
@@ -95,6 +96,10 @@ app.whenReady().then(() => {
   // resolving. Full-variant builds find the baked copy instantly; lite builds download it
   // once into a per-app cache (see src/main/browser/bootstrap.ts).
   void bootstrapChromium((message) => console.log('[Geepus] chromium bootstrap:', message));
+
+  // Checks GitHub Releases for a newer version and downloads only the changed bytes in the
+  // background (no-ops in dev / when unsigned / when offline — see src/main/updater).
+  initUpdater();
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

@@ -302,6 +302,29 @@ details.advanced > *:not(summary) {
   width: fit-content;
 }
 
+/* ---------- Update banner ---------- */
+
+.update-banner {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+  padding: 0.5rem 1rem;
+  font-size: 0.9rem;
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-bottom: 1px solid var(--border);
+}
+
+.update-banner.ready {
+  font-weight: 500;
+}
+
+.update-banner button {
+  padding: 0.3rem 0.9rem;
+  font-size: 0.85rem;
+}
+
 /* ---------- Chat ---------- */
 
 .chat {

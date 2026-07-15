@@ -5,6 +5,7 @@ import { BriefPanel } from './brief/BriefPanel';
 import { SchedulesPanel } from './schedule/SchedulesPanel';
 import { PermissionsPanel } from './settings/PermissionsPanel';
 import { ApprovalRequests } from './components/ApprovalRequests';
+import { UpdateBanner } from './components/UpdateBanner';
 
 /**
  * Four places, no jargon: Chat (the assistant), Today (your summary), Routines
@@ -41,6 +42,7 @@ export function App() {
           </button>
         ))}
       </nav>
+      <UpdateBanner />
       <ApprovalRequests />
       {view === 'chat' && <Chat />}
       {view === 'today' && <BriefPanel />}
