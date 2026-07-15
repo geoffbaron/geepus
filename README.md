@@ -6,7 +6,8 @@ your own machine**. No cloud accounts, no API keys required, no telemetry.
 
 ## Installing
 
-Grab the latest DMG and drag Geepus into Applications. There are two variants:
+**[⬇️ Get the latest release here.](https://github.com/geoffbaron/geepus/releases/latest)**
+Grab the DMG and drag Geepus into Applications. There are two variants:
 
 - **Geepus-\<version\>-full.dmg** — bigger download, works fully offline from first
   launch. Best if you don't already use Ollama or don't want to wait on any downloads.
