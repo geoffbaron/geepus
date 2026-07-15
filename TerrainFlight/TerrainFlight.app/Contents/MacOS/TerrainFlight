@@ -1,8 +1,0 @@
-#!/bin/bash
-# Launches the latest build of Terrain Flight; builds it first if missing.
-PROJ="/Users/geoffbaron/Geepus3/TerrainFlight"
-BIN="$PROJ/.build/release/TerrainFlight"
-if [ ! -x "$BIN" ]; then
-    cd "$PROJ" && /usr/bin/swift build -c release
-fi
-exec "$BIN" "$@"
