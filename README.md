@@ -62,6 +62,10 @@ above works everywhere.)
   (API keys, tokens) is redacted before it's ever stored.
 - **Schedules** — set up recurring or triggered tasks (cron-style, interval, or "when a
   file changes").
+- **Automatic updates** — Geepus updates itself in the background and only downloads what
+  *changed* between versions, so you never re-download the whole app. When an update is
+  ready you'll see one prompt to restart. (Requires a signed build from a public repo —
+  see [Releasing](RELEASING.md).)
 
 ## Privacy
 
